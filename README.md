@@ -20,7 +20,7 @@ Modules: fault tolerance, event-driven systems.
 
 A messaging service that handles send failures: retries with backoff,
 dead-letter handling for messages that never succeed, and de-duplication
-so retries don't deliver twice.
+so retries don't deliver twice or in the wrong order.
 
 Demo: drop the downstream consumer, show queued retries and the
 dead-letter path, then bring it back and show recovery.
