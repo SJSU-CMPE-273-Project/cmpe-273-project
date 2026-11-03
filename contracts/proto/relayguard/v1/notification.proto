@@ -1,0 +1,123 @@
+// RelayGuard message contract, v1.
+//
+// Every service, in every language, speaks these messages. Change this file
+// through a PR the whole team reviews: it is the one thing all teams share.
+//
+// Flow:
+//   producer --NotificationRequested--> Iggy --> ingest bridge --> Kafka
+//   (notifications.requested, key = account_id) --> delivery worker
+//   --> DeliveryStatus (notifications.status) / DeadLetter (notifications.dlq)
+
+syntax = "proto3";
+
+package relayguard.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/SJSU-CMPE-273-Project/cmpe-273-project/gen/go/relayguard/v1;relayguardv1";
+option java_multiple_files = true;
+option java_package = "edu.sjsu.cmpe273.relayguard.v1";
+
+// Priority lane (guardrail). Higher lanes are delivered first under load.
+enum Priority {
+  PRIORITY_UNSPECIFIED = 0;
+  PRIORITY_LOW = 1;      // marketing, low-balance reminders
+  PRIORITY_NORMAL = 2;   // deposit confirmations
+  PRIORITY_HIGH = 3;     // fraud alerts, OTP codes
+}
+
+enum Channel {
+  CHANNEL_UNSPECIFIED = 0;
+  CHANNEL_SMS = 1;
+  CHANNEL_PUSH = 2;
+  CHANNEL_EMAIL = 3;
+}
+
+enum NotificationType {
+  NOTIFICATION_TYPE_UNSPECIFIED = 0;
+  NOTIFICATION_TYPE_FRAUD_ALERT = 1;
+  NOTIFICATION_TYPE_DEPOSIT_PENDING = 2;
+  NOTIFICATION_TYPE_DEPOSIT_CONFIRMED = 3;
+  NOTIFICATION_TYPE_OTP = 4;
+  NOTIFICATION_TYPE_LOW_BALANCE = 5;
+}
+
+// Published by producers (core banking, fraud engine, auth/OTP).
+message NotificationRequested {
+  // Producer-assigned UUID. This is the idempotency key end to end:
+  // bridge dedup, Temporal activity ID and provider call all reuse it.
+  string event_id = 1;
+
+  // Partition key. All messages for one account are delivered in order.
+  string account_id = 2;
+
+  // Per-account, strictly increasing, assigned by the producer.
+  // The oracle checks delivered sequence numbers never go backwards.
+  uint64 sequence = 3;
+
+  NotificationType type = 4;
+  Priority priority = 5;
+
+  // Ordered list of channels to try (e.g. SMS, then PUSH, then EMAIL).
+  repeated Channel channels = 6;
+
+  // Destination, already resolved by the producer. Treated as PII:
+  // never logged or traced in plain text (guardrail).
+  string recipient = 7;
+
+  // Rendered message text. Also PII-masked in logs.
+  string body = 8;
+
+  // When the business event happened (not when it was published).
+  google.protobuf.Timestamp occurred_at = 9;
+
+  // Guardrail: do not deliver after this time (e.g. OTP = occurred_at + 5 min).
+  google.protobuf.Timestamp expires_at = 10;
+
+  // Which team/service produced it (for per-producer kill switch and audit).
+  string producer = 11;
+
+  // W3C traceparent so one trace follows the message across languages.
+  string traceparent = 12;
+}
+
+enum DeliveryOutcome {
+  DELIVERY_OUTCOME_UNSPECIFIED = 0;
+  DELIVERY_OUTCOME_DELIVERED = 1;
+  DELIVERY_OUTCOME_RETRYING = 2;
+  DELIVERY_OUTCOME_FAILED_OVER = 3;   // moved to a secondary provider/channel
+  DELIVERY_OUTCOME_EXPIRED = 4;       // TTL passed, intentionally not sent
+  DELIVERY_OUTCOME_DEAD_LETTERED = 5;
+  DELIVERY_OUTCOME_SKIPPED_DUPLICATE = 6;
+}
+
+// Published by the delivery worker to notifications.status.
+message DeliveryStatus {
+  string event_id = 1;
+  string account_id = 2;
+  uint64 sequence = 3;
+  DeliveryOutcome outcome = 4;
+  Channel channel = 5;
+  string provider = 6;        // e.g. "sms_primary", "sms_secondary"
+  uint32 attempt = 7;         // 1-based
+  string error = 8;           // last error, empty on success
+  google.protobuf.Timestamp at = 9;
+}
+
+message DeliveryAttempt {
+  uint32 attempt = 1;
+  Channel channel = 2;
+  string provider = 3;
+  string error = 4;
+  google.protobuf.Timestamp at = 5;
+}
+
+// Published to notifications.dlq after retries are exhausted.
+// Replay from the Ops Console re-publishes `original` with the SAME event_id,
+// so a replay can never cause a duplicate send.
+message DeadLetter {
+  NotificationRequested original = 1;
+  repeated DeliveryAttempt attempts = 2;
+  string reason = 3;
+  google.protobuf.Timestamp dead_lettered_at = 4;
+}

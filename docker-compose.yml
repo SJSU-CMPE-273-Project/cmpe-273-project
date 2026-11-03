@@ -1,0 +1,147 @@
+# RelayGuard local platform (Milestone 1)
+#
+#   docker compose up -d                  # core platform
+#   docker compose --profile obs up -d    # + tracing (Jaeger)
+#
+# Services in ./services/* get added here as each team member builds theirs.
+
+name: relayguard
+
+services:
+  # ---------------------------------------------------------------- Postgres
+  # Source of truth for idempotency keys, delivery log, DLQ metadata, audit.
+  # Local stand-in for AWS RDS.
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-relayguard}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-relayguard}
+      POSTGRES_DB: ${POSTGRES_DB:-relayguard}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # ------------------------------------------------------------- Apache Iggy
+  # Low-latency ingest streams. Producers (Java/Python/Ruby) publish here.
+  iggy:
+    image: apache/iggy:${IGGY_VERSION:-0.9.0}
+    environment:
+      IGGY_ROOT_USERNAME: ${IGGY_ROOT_USERNAME:-iggy}
+      IGGY_ROOT_PASSWORD: ${IGGY_ROOT_PASSWORD:-Secret123}
+      IGGY_TCP_ADDRESS: 0.0.0.0:8090
+      IGGY_HTTP_ADDRESS: 0.0.0.0:3000
+      IGGY_NODE_ADVERTISED_ADDRESS: iggy
+      IGGY_QUIC_ENABLED: "false"
+      IGGY_WEBSOCKET_ENABLED: "false"
+    ports:
+      - "8090:8090"   # TCP (SDKs)
+      - "3000:3000"   # HTTP API
+    volumes:
+      - iggydata:/app/local_data
+    # Iggy uses io_uring: needs these and a host kernel >= 5.19.
+    cap_add:
+      - SYS_NICE
+    security_opt:
+      - seccomp:unconfined
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+
+  # ------------------------------------------------------------ Apache Kafka
+  # Single-node KRaft broker (no ZooKeeper).
+  #   inside the compose network: kafka:9092
+  #   from your laptop:           localhost:9094
+  kafka:
+    image: apache/kafka:${KAFKA_VERSION:-3.9.1}
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    ports:
+      - "9094:9094"
+    volumes:
+      - kafkadata:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+
+  # One-shot job: creates the RelayGuard topics, then exits.
+  kafka-init:
+    image: apache/kafka:${KAFKA_VERSION:-3.9.1}
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./infra/kafka/create-topics.sh:/create-topics.sh:ro
+    entrypoint: ["/bin/bash", "/create-topics.sh"]
+    environment:
+      BOOTSTRAP: kafka:9092
+      PARTITIONS: ${KAFKA_PARTITIONS:-6}
+    restart: "no"
+
+  # --------------------------------------------------------------- Temporal
+  # Temporal dev server: frontend gRPC on 7233, web UI on 8233.
+  # Workflow history is kept in a file on a volume, so killing a *worker*
+  # (test T2) resumes from history. For the AWS demo, point workers at a
+  # Temporal cluster backed by RDS instead.
+  temporal:
+    image: temporalio/temporal:${TEMPORAL_VERSION:-latest}
+    command:
+      - server
+      - start-dev
+      - --ip=0.0.0.0
+      - --namespace=relayguard
+      - --db-filename=/data/temporal.db
+    ports:
+      - "7233:7233"   # gRPC frontend (SDKs)
+      - "8233:8233"   # Web UI
+    volumes:
+      - temporaldata:/data
+
+  # -------------------------------------------------------------- Toxiproxy
+  # Chaos harness sits between the delivery worker and the SMS adapters so
+  # tests can add latency, cut connections, or take a "provider" down.
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:${TOXIPROXY_VERSION:-2.9.0}
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    ports:
+      - "8474:8474"   # control API (used by harness/chaos)
+    volumes:
+      - ./infra/toxiproxy/toxiproxy.json:/config/toxiproxy.json:ro
+
+  # ---------------------------------------------- Observability (optional)
+  # OTLP in on 4317 (gRPC) / 4318 (HTTP), trace UI on 16686.
+  jaeger:
+    profiles: ["obs"]
+    image: jaegertracing/all-in-one:${JAEGER_VERSION:-1.62.0}
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
+
+volumes:
+  pgdata:
+  iggydata:
+  kafkadata:
+  temporaldata:

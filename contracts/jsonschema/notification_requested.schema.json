@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/SJSU-CMPE-273-Project/cmpe-273-project/contracts/jsonschema/notification_requested.schema.json",
+  "title": "NotificationRequested",
+  "description": "JSON mirror of relayguard.v1.NotificationRequested (proto3 JSON mapping). The ingest bridge rejects events that fail this schema (guardrail: schema validation at ingest).",
+  "type": "object",
+  "required": ["eventId", "accountId", "sequence", "type", "priority", "channels", "recipient", "body", "occurredAt", "producer"],
+  "additionalProperties": false,
+  "properties": {
+    "eventId": { "type": "string", "format": "uuid" },
+    "accountId": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "sequence": {
+      "description": "proto3 JSON encodes uint64 as a string",
+      "type": "string",
+      "pattern": "^[0-9]+$"
+    },
+    "type": {
+      "enum": [
+        "NOTIFICATION_TYPE_FRAUD_ALERT",
+        "NOTIFICATION_TYPE_DEPOSIT_PENDING",
+        "NOTIFICATION_TYPE_DEPOSIT_CONFIRMED",
+        "NOTIFICATION_TYPE_OTP",
+        "NOTIFICATION_TYPE_LOW_BALANCE"
+      ]
+    },
+    "priority": { "enum": ["PRIORITY_LOW", "PRIORITY_NORMAL", "PRIORITY_HIGH"] },
+    "channels": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "enum": ["CHANNEL_SMS", "CHANNEL_PUSH", "CHANNEL_EMAIL"] }
+    },
+    "recipient": { "type": "string", "minLength": 1 },
+    "body": { "type": "string", "minLength": 1, "maxLength": 640 },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": "string", "format": "date-time" },
+    "producer": { "type": "string", "minLength": 1 },
+    "traceparent": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
+    }
+  }
+}

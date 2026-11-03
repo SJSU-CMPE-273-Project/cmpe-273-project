@@ -249,3 +249,194 @@ Reported metrics: end-to-end latency (p50/p99, event → provider ack), loss rat
 | Pooja Singh | |
 
 **Repository:** https://github.com/SJSU-CMPE-273-Project/cmpe-273-project
+
+---
+
+## Addendum (updated November 2026)
+
+This section adds the parts of the project that the course grades but the original proposal did not cover: design thinking, the agentic harness, security and OWASP, token economics, deployment, and how the team works. The original proposal above is unchanged.
+
+### Graded Requirements Checklist
+
+What the professor grades, and where each item is covered in this project:
+
+| # | Requirement | How RelayGuard covers it | Section |
+|---|---|---|---|
+| 1 | Stanford d.school / IDEO design thinking: personas, empathy map, as-is vs. to-be | Four proxy personas (Maya, Jordan, Sam, Linda), Maya's empathy map, HMW questions, as-is vs. to-be, persona → feature → test traceability | [Design Thinking](#design-thinking-stanford-dschool--ideo) |
+| 2 | Middleware | Apache Iggy (ingest), Kafka (event log), Temporal (durable workflows), one Protobuf contract | [Middleware](#middleware) |
+| 3 | Agentic harness + prompts | DLQ ops agent: read-only tools, versioned prompts, human approval, guardrails | [Agentic Harness](#agentic-harness-dlq-ops-agent) |
+| 4 | OWASP | OWASP Top 10 mapped to our controls, plus OWASP LLM risks for the agent | [Security and OWASP](#security-and-owasp) |
+| 5 | Token economics | Tokens and cost per DLQ item, daily budget, cost-saving strategies | [Token Economics](#token-economics) |
+| 6 | PostgreSQL | Idempotency keys, delivery audit log, DLQ metadata | [Proposed Technology](#proposed-technology) |
+| 7 | Live one-node deploy, publicly accessible | Single-node deployment; only the Ops Console is public | [Deployment](#deployment) |
+| 8 | Failure demo: consumer down → retries + DLQ → recovery | Tests T1 (consumer down) and T5 (poison message → DLQ → replay) | [Failure-testing plan](#failure-testing-plan-for-the-nov-30-review) |
+
+### Design Thinking (Stanford d.school / IDEO)
+
+We followed the five d.school stages before writing code.
+
+> **Note:** we used **proxy personas** built from public banking-alert complaints and our own experience, not live interviews. The assumptions we still need to validate are listed at the end of this section.
+
+#### 1. Empathize: who did we build this for?
+
+| Persona | Role | Core pain |
+|---|---|---|
+| **Maya** (primary user) | Mobile banking customer | A late, duplicate or missing fraud alert costs her money or trust |
+| Jordan | On-call platform engineer | Can't tell a lost message from a delayed one; afraid replay will double-send |
+| Sam | Fraud-engine developer (Python) | Every team rewrites retry and dedup logic in its own language |
+| Linda | Compliance analyst | No audit trail proving a customer was notified in time |
+
+**Empathy map: Maya**
+
+| Says | Thinks |
+|---|---|
+| "Why did I get the same fraud text three times?" · "The code expired before it arrived." | No text means nothing happened. Repeated alerts are probably spam. |
+| **Does** | **Feels** |
+| Replies YES/NO to fraud alerts. Starts ignoring alerts after repeats. Calls the bank when a code never comes. | Anxious when an alert is late, annoyed when it repeats, betrayed when it never comes. |
+
+- **Pain:** a missing or late fraud alert means the money is gone before she can react.
+- **Gain:** one alert per event, in order, fast enough to act on.
+
+All four personas feel the same failure differently: the customer loses money or trust, the engineer loses sleep, the developer loses time, and the auditor loses proof.
+
+#### 2. Define: problem statement and "How might we"
+
+**Problem:** a bank alert crosses many teams, languages and providers, and no one guarantees the whole path. Customers get alerts late, twice, out of order or never, and no one can prove which.
+
+- HMW deliver every alert exactly once and in order, even when a provider fails?
+- HMW drop a stale one-time code instead of delivering it late?
+- HMW let an engineer see and safely replay any failed message?
+- HMW let producer teams publish once and stop writing their own retries?
+
+#### 3. Ideate
+
+We brainstormed options for each HMW question and ranked them on an impact/effort 2×2. Chosen: idempotency keys, per-account ordered workflows, a DLQ with safe replay, and the guardrails listed above.
+
+#### 4. Prototype
+
+- Ops Console mockup: message timeline, DLQ, replay, kill switch, agent suggestions
+- Platform scaffold: Docker Compose stack, Protobuf contract, database schema
+
+#### 5. Test
+
+Failure tests T1–T7, checked automatically by the oracle. Each test maps back to a persona need (traceability table below).
+
+#### As-is vs. to-be
+
+| As-is | To-be (RelayGuard) |
+|---|---|
+| Each team writes its own retry logic | One shared contract; the platform owns delivery |
+| Duplicates during retry storms | Exactly-once delivery through idempotency keys |
+| Lost messages leave no trace | Every message is delivered or in the DLQ, with full history |
+| Engineers grep five services to trace one message | One timeline per message in the Ops Console |
+| Stale codes still get delivered | Expired messages are dropped by the TTL guardrail |
+
+#### Persona → feature → test
+
+| Need | Feature | Proven by |
+|---|---|---|
+| Maya: one alert, in order | Idempotency key + per-account workflow | T2, T3, T4 |
+| Maya: no stale codes | Message TTL guardrail | T5 |
+| Jordan: safe recovery | DLQ + idempotent replay | T1, T5, T6 |
+| Sam: publish once | Shared Protobuf contract | Five-language demo |
+| Linda: proof of delivery | Postgres audit log | Ops Console timeline |
+
+#### Assumptions to validate
+
+- [ ] Customers prefer a late alert over a duplicate (except OTPs, which are useless late)
+- [ ] On-call engineers will trust automated replay if they can see it is idempotent
+- [ ] Producer teams will accept one shared Protobuf contract
+- [ ] Auditors need attempt-level history, not just the final state
+
+### Middleware
+
+RelayGuard is a message-oriented middleware layer between producer teams and delivery channels:
+
+| Middleware role | Component |
+|---|---|
+| Ingest buffer for high-rate producers | Apache Iggy |
+| Durable, partitioned event log | Apache Kafka |
+| Durable workflow orchestration (retries, timers, saga) | Temporal |
+| Shared message contract | Protobuf |
+
+### Agentic Harness: DLQ Ops Agent
+
+An LLM-based agent helps the on-call engineer (Jordan) triage the dead-letter queue. It **suggests**; a human **approves**; the platform **enforces**.
+
+```mermaid
+flowchart LR
+    DLQ[("DLQ items +<br/>attempt history")] --> AG["Ops agent<br/>(LLM + tools)"]
+    AG --> P["Proposal:<br/>replay / discard / escalate"]
+    P --> H{"Human approves<br/>in Ops Console?"}
+    H -- yes --> G["Guardrails check<br/>(TTL, rate limit, replay cap)"]
+    G --> R["Idempotent replay<br/>(same event_id)"]
+    H -- no --> X["Logged, no action"]
+```
+
+- **Tools (read-only by default):** read DLQ items, read attempt history, read provider and circuit-breaker status. The only write tool is `propose_action`; it does not replay anything itself.
+- **Prompts:** system and task prompts are stored in `agent/prompts/` and versioned with the code. Each proposal records the prompt version that produced it.
+- **Guardrails on the agent:** max replays per run, no replay of expired messages, rate limits still apply, PII masked before anything reaches the model, and every proposal requires human approval.
+- **Evaluation:** a fixed set of DLQ scenarios (expired OTP, poison message, provider outage) with expected actions, run on every prompt change.
+
+### Security and OWASP
+
+| OWASP Top 10 (2021) risk | Where it applies | Control in RelayGuard |
+|---|---|---|
+| A01 Broken Access Control | Ops Console replay and kill switch | Role-based access; replay and kill switch limited to operators |
+| A02 Cryptographic Failures | Service-to-service traffic, PII at rest | TLS in transit; phone and account numbers masked in logs |
+| A03 Injection | Event payloads, Ops Console search | Schema validation at ingest; parameterized SQL only |
+| A04 Insecure Design | Retry storms, duplicate sends | Idempotency keys, retry budget, rate limits, circuit breaker |
+| A05 Security Misconfiguration | Public demo deployment | Only the Ops Console is exposed; Kafka, Postgres and Temporal stay private |
+| A07 Identification and Authentication Failures | Producers publishing events | Signed service tokens per producer; kill switch per producer |
+| A09 Security Logging and Monitoring Failures | Audit trail | Full delivery and attempt log in Postgres; OpenTelemetry traces |
+
+**LLM-specific risks (OWASP Top 10 for LLM Applications):**
+
+| Risk | Control |
+|---|---|
+| Prompt injection (message content tries to instruct the agent) | Message bodies are passed as data, never as instructions; the agent cannot act without human approval |
+| Sensitive information disclosure | PII masked before it reaches the model |
+| Excessive agency | Read-only tools; one `propose_action` tool; human approval; replay cap |
+
+### Token Economics
+
+The ops agent is the only part of RelayGuard that uses an LLM, so token cost scales with DLQ volume, not with total message volume.
+
+| Item | Estimate (to be measured) |
+|---|---|
+| Tokens per DLQ item (input + output) | [__] |
+| Cost per 1,000 DLQ items | [$__] |
+| DLQ items per day at demo load | [__] |
+| Cost per day | [$__] |
+
+**Strategies to keep cost down:**
+- Batch similar DLQ items (e.g. all items from one provider outage) into one request
+- Use a small, cheap model for classification and a larger model only for unclear cases
+- Send masked summaries of attempt history, not raw logs
+- Cache results for repeated failure patterns
+- Hard daily token budget; when it is reached, the agent stops and the DLQ is handled manually
+
+### Deployment
+
+- **Local development:** Docker Compose, the full stack on one machine
+- **Live demo:** a single-node deployment on [AWS / chosen host], publicly accessible
+- **Public surface:** only the Ops Console (and the demo trigger) has a public URL; all other services are internal
+- **Cost:** free or low-cost tier where possible
+
+### Course Module Mapping (additions)
+
+| Module | Where it shows up |
+|---|---|
+| 11 Security | OWASP controls, service tokens, TLS, PII masking |
+| 12 Agentic Systems | DLQ ops agent, versioned prompts, human-in-the-loop, token budget |
+
+### How We Work
+
+- **Process:** design thinking first, then work tracked in **Jira**, one epic per lane
+- **Lanes:**
+  1. Ingest and producers
+  2. Delivery core
+  3. Adapters and reliability harness
+  4. Ops Console, platform and course extras
+- **Shared work:** design thinking, token economics, review slides
+- **Milestones:** Nov 4 contract frozen · Nov 11 happy path end to end · Nov 18 guardrails and failover · Nov 23 agent and security · Nov 30 failure-testing review · Dec 7 live demo

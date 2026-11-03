@@ -1,0 +1,20 @@
+[
+  {
+    "name": "sms_primary",
+    "listen": "0.0.0.0:21001",
+    "upstream": "sms-adapter-primary:8080",
+    "enabled": true
+  },
+  {
+    "name": "sms_secondary",
+    "listen": "0.0.0.0:21002",
+    "upstream": "sms-adapter-secondary:8080",
+    "enabled": true
+  },
+  {
+    "name": "push_email",
+    "listen": "0.0.0.0:21003",
+    "upstream": "push-email-adapter:8080",
+    "enabled": true
+  }
+]
