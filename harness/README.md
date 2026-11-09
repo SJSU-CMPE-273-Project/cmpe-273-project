@@ -1,12 +1,12 @@
 # Reliability Harness
 
-**Owner:** _TBD_ · Built for the **Nov 30 failure-testing review**.
+**Owner:** Pooja (Lane 3) · Built for the **Nov 30 failure-testing review**.
 
 | Part | Folder | What it does |
 |---|---|---|
 | Load generator | `load-generator/` | Replays realistic banking traffic (deposits, fraud alerts, OTPs) at normal and burst (10×) rates. |
 | Chaos injector | `chaos/` | Scripts against Toxiproxy's API (`localhost:8474`) and `docker compose kill/stop` to break things on cue. |
-| Oracle (fake phone) | `oracle/` | Acts as the SMS/push "provider". Records every message it receives and checks the invariants. |
+| Oracle (fake phone) | `oracle/` | **Built.** Acts as the SMS/push/email "provider", records every message and checks the invariants. See `oracle/README.md`. |
 
 ## Invariants the oracle checks
 - **No loss:** every `event_id` produced is delivered, expired, or in the DLQ.
