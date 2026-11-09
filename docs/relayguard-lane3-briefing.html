@@ -91,8 +91,8 @@ a { color: var(--accent); }
 
 <header>
   <div class="eyebrow">CMPE 273 · RelayGuard · Lane 3 status · Nov 9, 2026</div>
-  <h1>The SMS adapter is built. Here is what it does and what comes next.</h1>
-  <p class="lede">A briefing for teammates and the professor: how RelayGuard delivers banking alerts, where the SMS adapter fits, what is left before the Nov 30 failure review, and how we get the system live on the web.</p>
+  <h1>The SMS adapter and the oracle are built. Here is what they do and what comes next.</h1>
+  <p class="lede">A briefing for teammates and the professor: how RelayGuard delivers banking alerts, where the SMS adapter fits, how the oracle proves the system keeps its promises, what is left before the Nov 30 failure review, and how we get the system live on the web.</p>
 </header>
 
 <section>
@@ -108,7 +108,7 @@ a { color: var(--accent); }
 
 <section>
   <h2>How a message travels</h2>
-  <p>Each box is a separate microservice, owned by one lane. The SMS adapters (highlighted) are what I built this week.</p>
+  <p>Each box is a separate microservice, owned by one lane. The green boxes (the two SMS adapters and the oracle) are what I built this week.</p>
   <div class="mermaid-box">
 <pre class="mermaid">
 flowchart LR
@@ -120,15 +120,15 @@ flowchart LR
   T --> S1["SMS adapter primary<br/>Ruby<br/><b>built ✓</b>"]
   T --> S2["SMS adapter secondary<br/>Ruby<br/><b>built ✓</b>"]
   T --> N["Push / email adapter<br/>Node<br/><i>Lane 3, next</i>"]
-  S1 --> O["Oracle = fake phone<br/>checks the 4 promises<br/><i>Lane 3, next</i>"]
+  S1 --> O["Oracle = fake phone<br/>grades every run<br/><b>built ✓</b>"]
   S2 --> O
   N --> O
   W -.-> D["Dead-letter queue"]
   D -.-> C["Ops Console (React)<br/>replay · kill switch<br/><i>Lane 4</i>"]
   classDef done fill:#d9f0e2,stroke:#1d7a46,color:#10301e;
   classDef next fill:#fbf0db,stroke:#9a6200,color:#3a2700;
-  class S1,S2 done;
-  class N,O next;
+  class S1,S2,O done;
+  class N next;
 </pre>
   </div>
   <p class="note">Toxiproxy sits on purpose between the worker and the adapters. The chaos tests flip it to make a "provider" vanish, slow down or drop connections, and we watch whether the system keeps its four promises.</p>
@@ -190,15 +190,84 @@ flowchart LR
 </section>
 
 <section>
+  <h2>What the oracle does</h2>
+  <p>The oracle is the referee. It pretends to be the customer's phone and every provider behind it (SMS primary, SMS secondary, push, email). Every message the system delivers lands here, and at the end of a test run it answers one question: <b>did RelayGuard keep its promises?</b> Without it, "we survived the crash" is just a claim. With it, every test produces a pass/fail table.</p>
+
+  <h3>How a test run works</h3>
+  <ol class="steps">
+    <li><b>Reset.</b> The test script starts a fresh run with <code>POST /admin/reset</code>.</li>
+    <li><b>Say what was sent.</b> The load generator tells the oracle every message the producers sent (<code>POST /expected</code>). That list is the truth to compare against.</li>
+    <li><b>Break things.</b> Chaos scripts kill containers, flip Toxiproxy and set fault rules while traffic flows.</li>
+    <li><b>Grade.</b> <code>GET /report</code> compares what was sent with what reached the phone and prints the verdict.</li>
+  </ol>
+
+  <h3>The five checks</h3>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Check</th><th>Passes when</th><th>How it decides</th></tr></thead>
+      <tbody>
+        <tr><td><b>No loss</b></td><td>Every message sent is delivered, expired, or dead-lettered</td><td>Delivered comes from the oracle's own receipts. Only "expired" and "dead-lettered" are read from the worker's Postgres table, because those happen inside the worker.</td></tr>
+        <tr><td><b>No duplicates</b></td><td>Each message reaches the phone at most once</td><td>Counted across all providers and channels</td></tr>
+        <tr><td><b>Per-account order</b></td><td>For one account, message numbers never go backwards</td><td>Gaps are fine. A dead-lettered message replayed later is allowed to arrive late.</td></tr>
+        <tr><td><b>Latency</b></td><td>p99 from bank event to phone is under 2 s</td><td><code>occurred_at</code> to the moment the oracle receives it</td></tr>
+        <tr><td><b>No late delivery</b></td><td>Nothing arrives after its expiry time</td><td>An OTP that arrives after 5 minutes is useless and confusing, so it counts as a failure</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>The key idea: catching the duplicate that matters</h3>
+  <p>Real SMS providers remember each message's idempotency key, but each provider keeps its <i>own</i> memory. The oracle copies that behaviour, which lets it tell a harmless retry from a real double text:</p>
+  <div class="two">
+    <div style="display:grid; gap:8px">
+      <p><span class="chip c-ok">safe</span> <b>Retry to the same provider</b></p>
+      <p>The worker sends to <code>sms_primary</code>, the acknowledgement gets lost, and it sends again with the same key. The provider recognises the key and doesn't send a second text. The oracle logs it as an "idempotent replay".</p>
+    </div>
+    <div style="display:grid; gap:8px">
+      <p><span class="chip c-bad">duplicate</span> <b>Failover after success</b></p>
+      <p>Primary actually delivered, but the worker thought it failed and switched to <code>sms_secondary</code>. Secondary has never seen that key, so it sends too. The customer gets two fraud alerts. The oracle fails <b>no duplicates</b>.</p>
+    </div>
+  </div>
+  <p>This is exactly the bug that failover logic tends to have, and it's the one T2 and T6 are meant to expose.</p>
+
+  <h3>Fault rules for specific messages</h3>
+  <p>Toxiproxy and the adapter's switch break <i>every</i> message. Some tests need to break <i>one</i>:</p>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Rule</th><th>Effect</th><th>Test</th></tr></thead>
+      <tbody>
+        <tr><td><code>{"action":"fail","times":2}</code></td><td>503 twice, then accept</td><td>T4: message N fails, then N, N+1, N+2 still arrive in order</td></tr>
+        <tr><td><code>{"action":"reject"}</code></td><td>422 forever</td><td>T5: poison message must land in the DLQ, and replay must deliver it once</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>What it showed in the first end-to-end run</h3>
+  <p>I played the delivery worker (not built yet) and sent six messages through Toxiproxy: two normal ones, one that failed twice before succeeding, a repeat after a "lost" acknowledgement, a poison message the worker dead-lettered in Postgres, and an OTP. The real report:</p>
+  <div class="log">CHECK                RESULT  DETAIL
+no loss              PASS    6 expected: 5 delivered, 1 dead-lettered, 0 missing
+no duplicates        PASS    5 unique events, 0 delivered more than once
+per-account order    PASS    5 deliveries across 1 accounts, 0 out of order
+no late delivery     PASS    1 deliveries with a TTL, 0 arrived after expiry
+
+provider calls: 10 total (sms_primary 8, sms_secondary 2)
+  delivered 5, failed by rule 2, idempotent replay 1, rejected by rule 2
+ledger: connected (1 expired/dead-lettered)</div>
+  <p>Then I broke it on purpose by re-sending an already-delivered message through the secondary provider. <b>No duplicates</b> flipped to <span class="chip c-bad">FAIL</span>, which is the oracle doing its job.</p>
+  <p class="note">The latency line is left out: my shell test added about 1.5 s of container start-up per message, so its numbers are meaningless. Real latency numbers will come from the load generator. The oracle stores no phone numbers or message text, only IDs, and has 23 automated tests. Code is in <a href="https://github.com/SJSU-CMPE-273-Project/cmpe-273-project/pull/2">PR #2</a>.</p>
+</section>
+
+<section>
   <h2>How to explain it</h2>
   <div class="two">
     <div class="pitch">
       <div class="who">To a teammate · 30 seconds</div>
       <p>"The SMS adapter is live in compose behind Toxiproxy on ports 21001 and 21002. Send it <code>event_id</code>, <code>recipient</code> and <code>body</code>, plus <code>account_id</code>, <code>sequence</code> and <code>occurred_at</code> so the oracle can check order and latency. A 503 or 504 means retry, a 422 or 400 means stop. You can flip it into failure modes with one curl to test your retries. The full contract is in its README."</p>
+      <p>"The adapters forward to the oracle, so every delivery is recorded. Open <code>localhost:18080/report?format=text</code> any time to see if your change broke ordering or caused duplicates."</p>
     </div>
     <div class="pitch">
       <div class="who">To the professor · 1 minute</div>
       <p>"Lane 3 owns the edge of the system and the tools that prove it works. The adapter turns provider behaviour into clear retryable or permanent signals, which is what lets the Temporal worker do retries, failover and dead-lettering correctly. It carries the idempotency key end to end, masks PII in every log, and is stateless on a read-only filesystem. Its fault switch, together with Toxiproxy, lets us inject provider outages, timeouts and rejections on cue for the T1–T7 failure tests."</p>
+      <p>"The oracle is an independent referee. It records every message that reaches the 'phone' and grades each run on no loss, no duplicates, per-account order, latency and expiry. It doesn't trust the system's own claim that something was delivered. It models per-provider idempotency, so it can tell a safe retry from a real double text after failover."</p>
     </div>
   </div>
 
@@ -212,6 +281,12 @@ flowchart LR
       <p>The worker gets 503s or refused connections from <code>sms_primary</code>, retries a few times with backoff, then switches to <code>sms_secondary</code>. If both fail it moves to push/email, and only after every channel is exhausted does the message go to the dead-letter queue. Test T6 measures how long that failover takes.</p></details>
     <details><summary>Why 422 and not just 500 for a rejected message?</summary>
       <p>Status codes in the 4xx range mean "the request itself is the problem, sending it again won't help." Codes in the 5xx range mean "the server had a problem, try again." Using the right family lets the worker decide without parsing error text.</p></details>
+    <details><summary>Why doesn't the oracle just read the delivery table in Postgres?</summary>
+      <p>That table is written by the delivery worker, which is the thing under test. If the worker had a bug that marked a message delivered without sending it, its own table would agree with it. The oracle counts only what actually reached it. It reads Postgres for just two states, expired and dead-lettered, because those are deliberate decisions that never reach a phone.</p></details>
+    <details><summary>Why does the oracle keep everything in memory?</summary>
+      <p>It's test equipment, not part of the product. Each test run starts with a reset, and the report is saved to <code>docs/results/</code>. Keeping it in memory also keeps it stateless, which fits the storage rule for Kubernetes.</p></details>
+    <details><summary>Isn't a replayed DLQ message an ordering violation?</summary>
+      <p>By the strict rule, yes: message 5 arrives after message 6. But that's the intended behaviour of a replay, so the oracle exempts messages the system dead-lettered. Any other message arriving out of order still fails the check.</p></details>
     <details><summary>Did this change the shared Protobuf contract?</summary>
       <p>No. The adapter's HTTP request is the interface between the worker and the adapter only. I added three optional fields there (<code>account_id</code>, <code>sequence</code>, <code>occurred_at</code>) that the oracle needs, and flagged them to Aaron in the PR.</p></details>
   </div>
@@ -225,8 +300,8 @@ flowchart LR
       <thead><tr><th>Item</th><th>Why</th><th>Target</th><th>Status</th></tr></thead>
       <tbody>
         <tr><td>SMS adapter ×2</td><td>Delivery endpoint, failover target</td><td class="nowrap">Nov 11</td><td><span class="chip c-ok">done · PR #1</span></td></tr>
-        <tr><td>Oracle (fake phone)</td><td>Records every delivery and checks the four promises; produces the pass/fail table</td><td class="nowrap">Nov 13–15</td><td><span class="chip c-warn">next</span></td></tr>
-        <tr><td>Push / email adapter (Node)</td><td>Fallback channel when both SMS providers fail</td><td class="nowrap">Nov 18</td><td><span class="chip c-warn">to do</span></td></tr>
+        <tr><td>Oracle (fake phone)</td><td>Records every delivery and checks the promises; produces the pass/fail table</td><td class="nowrap">Nov 13–15</td><td><span class="chip c-ok">done · PR #2</span></td></tr>
+        <tr><td>Push / email adapter (Node)</td><td>Fallback channel when both SMS providers fail</td><td class="nowrap">Nov 18</td><td><span class="chip c-warn">next</span></td></tr>
         <tr><td>Chaos scripts</td><td>One command per test: stop containers, flip Toxiproxy, set fault modes</td><td class="nowrap">Nov 20</td><td><span class="chip c-warn">to do</span></td></tr>
         <tr><td>Load generator</td><td>Normal and 10× burst traffic for T3 and T7 (shared with Lane 1)</td><td class="nowrap">Nov 20</td><td><span class="chip c-warn">to do</span></td></tr>
         <tr><td>T1 and T5 passing</td><td>Consumer down 5 min; poison message lands in DLQ and replays once</td><td class="nowrap">Nov 23</td><td><span class="chip c-warn">to do</span></td></tr>
@@ -241,7 +316,8 @@ flowchart LR
     <table>
       <thead><tr><th>Requirement</th><th>Where it shows up</th><th>Owner</th></tr></thead>
       <tbody>
-        <tr><td>Happy path producer → phone</td><td>One message end to end by Nov 11</td><td>All lanes</td></tr>
+        <tr><td>Happy path producer → phone</td><td>One message end to end by Nov 11. The phone end (adapters + oracle) is ready.</td><td>All lanes</td></tr>
+        <tr><td>Fix Postgres on Apple Silicon</td><td><code>postgres:16</code> crashes on start on Pooja's Mac; <code>postgres:16-alpine</code> works. Decide before Nov 11.</td><td>Lane 4</td></tr>
         <tr><td>Design thinking (d.school)</td><td>Personas (bank customer, fraud analyst, on-call engineer), empathy map, as-is vs to-be</td><td>Team</td></tr>
         <tr><td>Commit control and rollback</td><td>Postgres WAL, transactional outbox, append-only log, idempotency keys, saga; 2PC considered and rejected</td><td>Lanes 1–2</td></tr>
         <tr><td>Agentic harness, prompts, token economics</td><td>DLQ agent with versioned system prompts in the repo and a cost estimate</td><td>Lane 4</td></tr>
