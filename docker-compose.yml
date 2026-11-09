@@ -128,6 +128,33 @@ services:
     volumes:
       - ./infra/toxiproxy/toxiproxy.json:/config/toxiproxy.json:ro
 
+  # ------------------------------------------------- SMS adapters (Lane 3)
+  # Same image, two "providers", so the worker can fail over primary -> secondary.
+  # The worker must call them THROUGH Toxiproxy (toxiproxy:21001 / :21002).
+  # Host ports 18081/18082 are only for poking them directly while debugging.
+  # PROVIDER_URL is blank until the oracle exists: blank = accept and log (simulate).
+  sms-adapter-primary: &sms-adapter
+    build: ./services/sms-adapter-ruby
+    environment:
+      PROVIDER_NAME: sms_primary
+      PROVIDER_URL: ${SMS_PROVIDER_URL:-}
+      FAULT_MODE: ${SMS_PRIMARY_FAULT_MODE:-ok}
+      ADMIN_TOKEN: ${ADAPTER_ADMIN_TOKEN:-}
+    ports:
+      - "18081:8080"
+    read_only: true          # stateless: nothing is written to disk
+    tmpfs: [/tmp]
+
+  sms-adapter-secondary:
+    <<: *sms-adapter
+    environment:
+      PROVIDER_NAME: sms_secondary
+      PROVIDER_URL: ${SMS_PROVIDER_URL:-}
+      FAULT_MODE: ${SMS_SECONDARY_FAULT_MODE:-ok}
+      ADMIN_TOKEN: ${ADAPTER_ADMIN_TOKEN:-}
+    ports:
+      - "18082:8080"
+
   # ---------------------------------------------- Observability (optional)
   # OTLP in on 4317 (gRPC) / 4318 (HTTP), trace UI on 16686.
   jaeger:
