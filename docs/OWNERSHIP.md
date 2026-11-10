@@ -9,10 +9,10 @@ Fill in names, then each person works in their own folder and opens PRs.
 | Auth / OTP producer | `services/auth-otp-ruby` | Ruby | | OTP TTL |
 | Ingest Bridge | `services/ingest-bridge-go` | Go | | T3, bridge crash |
 | Delivery Worker | `services/delivery-worker-go` | Go | | T2, T4, T5, T6 |
-| SMS Adapter (×2) | `services/sms-adapter-ruby` | Ruby | | T1, T6 |
-| Push / Email Adapter | `services/push-email-adapter-node` | Node.js | | fallback |
+| SMS Adapter (×2) | `services/sms-adapter-ruby` | Ruby | Pooja | T1, T6 |
+| Push / Email Adapter | `services/push-email-adapter-node` | Node.js | Pooja | fallback |
 | Ops Console | `services/ops-console-react` | TypeScript | | DLQ replay |
-| Harness (load, chaos, oracle) | `harness/` | any | | runs T1–T7 |
+| Harness (load, chaos, oracle) | `harness/` | any | Pooja | runs T1–T7 |
 | Platform / compose / AWS | `infra/`, `docker-compose.yml` | — | | AWS deploy |
 | Contract | `contracts/` | Protobuf | **whole team** | — |
 
