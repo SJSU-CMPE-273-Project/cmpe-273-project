@@ -51,4 +51,16 @@ for language, command in commands.items():
     for invalid in ['0', '9223372036854775808']:
         run = subprocess.run(command, input=json.dumps(dict(base, sequence=invalid)), text=True, capture_output=True)
         assert run.returncode != 0, (language, invalid)
+for invalid in [None, '', 'ff-' + base['traceparent'][3:],
+                '00-' + '0' * 32 + '-00f067aa0ba902b7-01',
+                '00-4bf92f3577b34da6a3ce929d0e0e4736-' + '0' * 16 + '-01',
+                base['traceparent'].upper(), base['traceparent'][:-2] + '03']:
+    doc = dict(base)
+    if invalid is None:
+        del doc['traceparent']
+    else:
+        doc['traceparent'] = invalid
+    assert list(validator.iter_errors(doc)), invalid
+    run = subprocess.run(commands['go'], input=json.dumps(doc), text=True, capture_output=True)
+    assert run.returncode != 0, invalid
 print(f'PASS: {count} cross-language fixture roundtrips; invalid enum, timestamp and sequence profiles rejected')

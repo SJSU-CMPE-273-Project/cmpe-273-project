@@ -14,7 +14,8 @@
     "recipient",
     "body",
     "occurredAt",
-    "producer"
+    "producer",
+    "traceparent"
   ],
   "additionalProperties": false,
   "properties": {
@@ -84,8 +85,15 @@
       "minLength": 1
     },
     "traceparent": {
+      "description": "W3C version 00 trace context with nonzero trace/parent IDs and sampled or unsampled flags.",
       "type": "string",
-      "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
+      "pattern": "^00-[0-9a-f]{32}-[0-9a-f]{16}-0[01]$",
+      "not": {
+        "anyOf": [
+          { "pattern": "^00-0{32}-" },
+          { "pattern": "^00-[0-9a-f]{32}-0{16}-" }
+        ]
+      }
     }
   }
 }

@@ -53,7 +53,19 @@ It validates existing data and is safe to re-run. It does not erase data.
 | Ruby OTP | `otp-demo-0001` … `otp-demo-9999` | `.state/ruby.sqlite3` |
 
 Run `tools/demo-producer.py` as the owner; the language programs are one-shot
-codec/transport helpers. The runner holds an exclusive OS lock through publish,
+codec/transport helpers. Each new event gets a UUIDv4 `event_id` and the current
+UTC `occurred_at` with millisecond precision (for example,
+`2026-11-10T18:05:00.123Z`). Both are captured at event creation and persisted;
+retries retain the original ID and timestamp. Each event also gets a fresh
+[W3C version 00 traceparent](https://www.w3.org/TR/trace-context/#traceparent-header)
+with random nonzero 128-bit trace and 64-bit parent IDs and sampled flag `01`.
+The schema requires trace context (version `00`, flags `00` or `01`). The runner
+persists it before publishing and retains it on retries. Legacy pending events
+without context are backfilled once and persisted before their next send,
+preserving the original event ID, timestamp and sequence. These synthetic
+producers start a new trace per event; this adds context propagation, not span
+export or an upstream request instrumentation API.
+The runner holds an exclusive OS lock through publish,
 persists sequence + exact event in one SQLite FULL-synchronous transaction,
 then publishes one event at a time. It marks that event acknowledged only after
 the transport returns success. A failure stops publication; the next process

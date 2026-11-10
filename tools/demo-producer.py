@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -27,6 +28,17 @@ def partition(account):
     return int.from_bytes(hashlib.sha256(account.encode()).digest()[:4], 'big') % 6
 
 
+def new_traceparent():
+    # W3C version 00: independent, nonzero random trace and parent IDs.
+    trace_id = 0
+    while trace_id == 0:
+        trace_id = secrets.randbits(128)
+    parent_id = 0
+    while parent_id == 0:
+        parent_id = secrets.randbits(64)
+    return f'00-{trace_id:032x}-{parent_id:016x}-01'
+
+
 def publisher(language):
     if language == 'java':
         return ['java', '-jar', str(ROOT / 'services/core-banking-java/target/deposit-producer-1.0.0.jar')]
@@ -39,8 +51,9 @@ def publisher(language):
 
 
 def event(language, account, seq):
-    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
-    stamp = lambda value: value.isoformat().replace('+00:00', 'Z')
+    # Capture business-event time once, before persistence or transport retries.
+    now = dt.datetime.now(dt.timezone.utc)
+    stamp = lambda value: value.isoformat(timespec='milliseconds').replace('+00:00', 'Z')
     kind = {'java': 'DEPOSIT_PENDING' if seq % 2 else 'DEPOSIT_CONFIRMED',
             'python': 'FRAUD_ALERT', 'ruby': 'OTP'}[language]
     return {'eventId': str(uuid.uuid4()), 'accountId': account, 'sequence': str(seq),
@@ -49,7 +62,7 @@ def event(language, account, seq):
             'channels': ['CHANNEL_SMS'], 'recipient': '+14085550123',
             'body': 'Synthetic demo ' + kind, 'occurredAt': stamp(now),
             'expiresAt': stamp(now + dt.timedelta(seconds=300 if language == 'ruby' else 1800)),
-            'producer': POOLS[language][1]}
+            'producer': POOLS[language][1], 'traceparent': new_traceparent()}
 
 
 def main():
@@ -85,6 +98,13 @@ def main():
         def drain():
             for row, payload in db.execute('SELECT id,payload FROM events WHERE acked=0 ORDER BY id').fetchall():
                 doc = json.loads(payload)
+                # Upgrade legacy pending events once, persisting context before
+                # any send so subsequent retries keep the same traceparent.
+                if not doc.get('traceparent'):
+                    doc['traceparent'] = new_traceparent()
+                    payload = json.dumps(doc, separators=(',', ':'))
+                    with db:
+                        db.execute('UPDATE events SET payload=? WHERE id=?', (payload, row))
                 if args.dry_run:
                     print(payload)
                 else:

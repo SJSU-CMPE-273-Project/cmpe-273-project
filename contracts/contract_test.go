@@ -67,3 +67,38 @@ func TestInvalidProfile(t *testing.T) {
 		}
 	}
 }
+
+func TestTraceparentRequiredAndValid(t *testing.T) {
+	data, err := os.ReadFile("fixtures/ordinary.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, traceparent := range []any{
+		nil, "", "ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+		"00-00000000000000000000000000000000-00f067aa0ba902b7-01",
+		"00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01",
+		"00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01",
+		"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-03",
+	} {
+		var doc map[string]any
+		if err := json.Unmarshal(data, &doc); err != nil {
+			t.Fatal(err)
+		}
+		if traceparent == nil {
+			delete(doc, "traceparent")
+		} else {
+			doc["traceparent"] = traceparent
+		}
+		value, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Decode(value); err == nil {
+			t.Errorf("accepted invalid traceparent %v", traceparent)
+		}
+	}
+	unsampled := strings.Replace(string(data), "00f067aa0ba902b7-01", "00f067aa0ba902b7-00", 1)
+	if _, err := Decode([]byte(unsampled)); err != nil {
+		t.Fatalf("unsampled trace context rejected: %v", err)
+	}
+}
