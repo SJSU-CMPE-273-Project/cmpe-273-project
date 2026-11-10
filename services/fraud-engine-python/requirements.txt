@@ -1,0 +1,3 @@
+apache-iggy==0.9.0
+protobuf==6.33.5
+jsonschema[format]==4.26.0

@@ -35,6 +35,8 @@ services:
     environment:
       IGGY_ROOT_USERNAME: ${IGGY_ROOT_USERNAME:-iggy}
       IGGY_ROOT_PASSWORD: ${IGGY_ROOT_PASSWORD:-Secret123}
+      IGGY_SHARDING_CPU_ALLOCATION: "all"
+      IGGY_SHARDING_PIN_CORES: "false"
       IGGY_TCP_ADDRESS: 0.0.0.0:8090
       IGGY_HTTP_ADDRESS: 0.0.0.0:3000
       IGGY_NODE_ADVERTISED_ADDRESS: iggy
@@ -54,6 +56,22 @@ services:
       memlock:
         soft: -1
         hard: -1
+
+  # Retry login until Iggy is ready; create-only and safe on existing volumes.
+  iggy-init:
+    image: python:3.12.12-slim
+    depends_on:
+      iggy:
+        condition: service_started
+    environment:
+      IGGY_HTTP_URL: http://iggy:3000
+      IGGY_ROOT_USERNAME: ${IGGY_ROOT_USERNAME:-iggy}
+      IGGY_ROOT_PASSWORD: ${IGGY_ROOT_PASSWORD:-Secret123}
+      IGGY_PARTITIONS: "6"
+    volumes:
+      - ./infra/iggy/init.py:/init.py:ro
+    entrypoint: ["python", "/init.py"]
+    restart: "no"
 
   # ------------------------------------------------------------ Apache Kafka
   # Single-node KRaft broker (no ZooKeeper).

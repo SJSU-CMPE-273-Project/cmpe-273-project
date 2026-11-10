@@ -9,7 +9,7 @@
 CREATE TABLE ingested_events (
     event_id      UUID        PRIMARY KEY,
     account_id    TEXT        NOT NULL,
-    sequence      BIGINT      NOT NULL,
+    sequence      BIGINT      NOT NULL CONSTRAINT ingested_sequence_positive CHECK (sequence > 0),
     producer      TEXT        NOT NULL,
     received_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (account_id, sequence)          -- one event per account slot
@@ -27,7 +27,7 @@ CREATE TYPE delivery_state AS ENUM (
 CREATE TABLE deliveries (
     event_id      UUID           PRIMARY KEY REFERENCES ingested_events (event_id),
     account_id    TEXT           NOT NULL,
-    sequence      BIGINT         NOT NULL,
+    sequence      BIGINT         NOT NULL CONSTRAINT delivery_sequence_positive CHECK (sequence > 0),
     priority      SMALLINT       NOT NULL,
     state         delivery_state NOT NULL DEFAULT 'pending',
     channel       TEXT,                     -- channel that finally succeeded

@@ -2,7 +2,8 @@
 # Creates RelayGuard's Kafka topics. Safe to re-run (--if-not-exists).
 #
 # notifications.requested  validated, deduped events from the ingest bridge
-#                          key = account_id  -> per-account ordering
+#                          raw NotificationRequested Protobuf, key = UTF-8 account_id
+#                          preserves arrival order; see contracts/README.md
 # notifications.status     delivery outcomes (delivered / failed / dead-lettered)
 # notifications.dlq        messages that exhausted retries, with attempt history
 set -euo pipefail
