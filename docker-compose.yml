@@ -2,6 +2,8 @@
 #
 #   docker compose up -d                  # core platform
 #   docker compose --profile obs up -d    # + tracing (Jaeger)
+#   Services send traces only when OTEL_EXPORTER_OTLP_ENDPOINT is set, e.g.
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318 docker compose --profile obs up -d
 #
 # Services in ./services/* get added here as each team member builds theirs.
 
@@ -145,6 +147,53 @@ services:
       - "8474:8474"   # control API (used by harness/chaos)
     volumes:
       - ./infra/toxiproxy/toxiproxy.json:/config/toxiproxy.json:ro
+
+  # ------------------------------------------------- SMS adapters (Lane 3)
+  # Same image, two "providers", so the worker can fail over primary -> secondary.
+  # The worker must call them THROUGH Toxiproxy (toxiproxy:21001 / :21002).
+  # Host ports 18081/18082 are only for poking them directly while debugging.
+  # They forward to the oracle (fake phone). Set SMS_PROVIDER_URL= (empty) to simulate instead.
+  sms-adapter-primary: &sms-adapter
+    build: ./services/sms-adapter-ruby
+    environment:
+      PROVIDER_NAME: sms_primary
+      PROVIDER_URL: ${SMS_PROVIDER_URL-http://oracle:8080/sms}
+      FAULT_MODE: ${SMS_PRIMARY_FAULT_MODE:-ok}
+      ADMIN_TOKEN: ${ADAPTER_ADMIN_TOKEN:-}
+      OTEL_SERVICE_NAME: sms-adapter-primary
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}   # empty = tracing off
+    ports:
+      - "18081:8080"
+    read_only: true          # stateless: nothing is written to disk
+    tmpfs: [/tmp]
+
+  sms-adapter-secondary:
+    <<: *sms-adapter
+    environment:
+      PROVIDER_NAME: sms_secondary
+      PROVIDER_URL: ${SMS_PROVIDER_URL-http://oracle:8080/sms}
+      FAULT_MODE: ${SMS_SECONDARY_FAULT_MODE:-ok}
+      ADMIN_TOKEN: ${ADAPTER_ADMIN_TOKEN:-}
+      OTEL_SERVICE_NAME: sms-adapter-secondary
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}   # empty = tracing off
+    ports:
+      - "18082:8080"
+
+  # ------------------------------------------- Oracle / fake phone (Lane 3)
+  # Plays every provider (SMS, push, email) and grades each run:
+  # no loss, no duplicates, per-account order, latency. Report: localhost:18080/report?format=text
+  oracle:
+    build: ./harness/oracle
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-relayguard}:${POSTGRES_PASSWORD:-relayguard}@postgres:5432/${POSTGRES_DB:-relayguard}
+      P99_TARGET_MS: ${ORACLE_P99_TARGET_MS:-2000}
+      ADMIN_TOKEN: ${ORACLE_ADMIN_TOKEN:-}
+      OTEL_SERVICE_NAME: oracle
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}   # empty = tracing off
+    ports:
+      - "18080:8080"
+    read_only: true
+    tmpfs: [/tmp]
 
   # ---------------------------------------------- Observability (optional)
   # OTLP in on 4317 (gRPC) / 4318 (HTTP), trace UI on 16686.

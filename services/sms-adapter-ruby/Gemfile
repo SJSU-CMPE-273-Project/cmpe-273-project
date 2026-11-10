@@ -1,0 +1,19 @@
+source "https://rubygems.org"
+
+ruby ">= 3.2"
+
+gem "sinatra", "~> 4.0"   # tiny HTTP framework: routes + JSON in a few lines
+gem "puma", "~> 6.4"      # multi-threaded web server (handles concurrent sends)
+gem "rackup", "~> 2.1"    # lets Sinatra 4 boot under Puma
+
+# OpenTelemetry tracing (off unless OTEL_EXPORTER_OTLP_ENDPOINT is set; see lib/telemetry.rb)
+gem "opentelemetry-sdk", "~> 1.5"
+gem "opentelemetry-exporter-otlp", "~> 0.29"   # OTLP over HTTP -> Jaeger :4318
+gem "opentelemetry-instrumentation-sinatra", "~> 0.24"
+gem "opentelemetry-instrumentation-net_http", "~> 0.22"
+
+group :test do
+  gem "minitest", "~> 5.25"
+  gem "rack-test", "~> 2.1"  # call the app in-process, no real server needed
+  gem "webmock", "~> 3.23"   # fake the downstream provider in tests
+end
