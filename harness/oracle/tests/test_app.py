@@ -144,3 +144,64 @@ def test_admin_token(monkeypatch):
     assert c.post("/admin/reset").status_code == 401
     assert c.post("/admin/reset", headers={"Authorization": "Bearer s3cret"}).status_code == 200
     assert deliver(c, "e1").status_code == 200  # provider endpoints stay open for the adapters
+
+
+# ---- OpenTelemetry --------------------------------------------------------
+
+TRACE_ID = "4bf92f3577b34da6a3ce929d0e0e4736"
+FROM_ADAPTER = f"00-{TRACE_ID}-00f067aa0ba902b7-01"
+
+
+@pytest.fixture
+def traced():
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    exporter = InMemorySpanExporter()
+    c = TestClient(create_app(recorder=Recorder(), ledger=FakeLedger(), span_exporter=exporter))
+    return c, exporter
+
+
+def traced_deliver(c, eid, provider="sms_primary"):
+    msg = {"event_id": eid, "account_id": "a1", "sequence": 1, "occurred_at": now_iso(),
+           "recipient": "+14085550123", "body": "code 482913", "provider": provider}
+    return c.post("/sms", json=msg, headers={"Idempotency-Key": eid, "traceparent": FROM_ADAPTER})
+
+
+def server_spans(exporter):
+    from opentelemetry.trace import SpanKind
+    return [s for s in exporter.get_finished_spans() if s.kind == SpanKind.SERVER]
+
+
+def test_provider_call_joins_the_adapters_trace(traced):
+    c, exporter = traced
+    assert traced_deliver(c, "e1").status_code == 200
+    (span,) = server_spans(exporter)
+    assert format(span.context.trace_id, "032x") == TRACE_ID      # same trace as the adapter
+    assert format(span.parent.span_id, "016x") == "00f067aa0ba902b7"  # child of the adapter's call
+    assert span.attributes["relayguard.event_id"] == "e1"
+    assert span.attributes["relayguard.verdict"] == "delivered"
+
+
+def test_duplicate_is_marked_on_the_span(traced):
+    c, exporter = traced
+    traced_deliver(c, "e1", provider="sms_primary")
+    traced_deliver(c, "e1", provider="sms_secondary")  # failover after success
+    traced_deliver(c, "e1", provider="sms_secondary")  # same-provider retry
+    assert [s.attributes["relayguard.verdict"] for s in server_spans(exporter)] == \
+        ["delivered", "duplicate", "idempotent_replay"]
+
+
+def test_no_pii_in_spans_and_health_not_traced(traced):
+    c, exporter = traced
+    traced_deliver(c, "e1")
+    c.get("/health")
+    dump = repr([(s.name, dict(s.attributes), s.events) for s in exporter.get_finished_spans()])
+    assert "4085550123" not in dump and "482913" not in dump
+    assert all("/health" not in s.name for s in exporter.get_finished_spans())
+
+
+def test_tracing_off_by_default(client, monkeypatch):
+    # No OTEL_EXPORTER_OTLP_ENDPOINT: nothing is set up and calls behave as before.
+    from oracle import telemetry
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    assert telemetry.enabled() is False
+    assert deliver(client, "e1").status_code == 200

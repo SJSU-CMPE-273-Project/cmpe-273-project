@@ -16,6 +16,22 @@
 
 Each run prints a pass/fail table plus the numbers. Save the output in `docs/results/` for the README.
 
+## Service level objectives (draft, for team review)
+The oracle measures the SLIs (service level indicators); these are the targets it grades against. **The numbers are proposals, not measured yet.** Agree on them as a team before the Nov 30 review.
+
+| SLI (what we measure) | SLO (target) | Kind | Where it comes from |
+|---|---|---|---|
+| Events accounted for (delivered, expired or DLQ) | **100%** | invariant: any miss fails | oracle `no loss` |
+| Events delivered more than once | **0** | invariant | oracle `no duplicates` |
+| Per-account order violations | **0** | invariant | oracle `per-account order` |
+| OTPs delivered after `expires_at` | **0** | invariant | oracle `no late delivery` |
+| End-to-end latency, normal load | **p99 ≤ 2 s** | SLO | oracle `latency` (`P99_TARGET_MS`) |
+| End-to-end latency during a provider outage (T6) | p99 ≤ 30 s (proposed) | SLO | oracle latency during T6 |
+| Delivered without going to the DLQ, normal load | ≥ 99.9% (proposed) | SLO | DLQ count / total |
+| Backlog drained after a 5-min outage (T1) | ≤ 2 min (proposed) | SLO | time to last delivery |
+
+An **SLA** is the external promise built on these, for example "fraud alerts delivered within 30 s, 99.9% of the month". We'd state it on the landing page, but a class project has no customer to owe penalties to.
+
 ## Test matrix (from the proposal)
 | Test | Fault | Chaos command (sketch) | Pass |
 |---|---|---|---|

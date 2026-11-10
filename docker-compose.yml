@@ -2,6 +2,8 @@
 #
 #   docker compose up -d                  # core platform
 #   docker compose --profile obs up -d    # + tracing (Jaeger)
+#   Services send traces only when OTEL_EXPORTER_OTLP_ENDPOINT is set, e.g.
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318 docker compose --profile obs up -d
 #
 # Services in ./services/* get added here as each team member builds theirs.
 
@@ -140,6 +142,8 @@ services:
       PROVIDER_URL: ${SMS_PROVIDER_URL-http://oracle:8080/sms}
       FAULT_MODE: ${SMS_PRIMARY_FAULT_MODE:-ok}
       ADMIN_TOKEN: ${ADAPTER_ADMIN_TOKEN:-}
+      OTEL_SERVICE_NAME: sms-adapter-primary
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}   # empty = tracing off
     ports:
       - "18081:8080"
     read_only: true          # stateless: nothing is written to disk
@@ -152,6 +156,8 @@ services:
       PROVIDER_URL: ${SMS_PROVIDER_URL-http://oracle:8080/sms}
       FAULT_MODE: ${SMS_SECONDARY_FAULT_MODE:-ok}
       ADMIN_TOKEN: ${ADAPTER_ADMIN_TOKEN:-}
+      OTEL_SERVICE_NAME: sms-adapter-secondary
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}   # empty = tracing off
     ports:
       - "18082:8080"
 
@@ -164,6 +170,8 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-relayguard}:${POSTGRES_PASSWORD:-relayguard}@postgres:5432/${POSTGRES_DB:-relayguard}
       P99_TARGET_MS: ${ORACLE_P99_TARGET_MS:-2000}
       ADMIN_TOKEN: ${ORACLE_ADMIN_TOKEN:-}
+      OTEL_SERVICE_NAME: oracle
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}   # empty = tracing off
     ports:
       - "18080:8080"
     read_only: true

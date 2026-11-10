@@ -28,6 +28,9 @@ class Rule:
 class Outcome:
     status: int
     body: dict
+    # delivered | duplicate | idempotent_replay | failed_by_rule | rejected_by_rule
+    # (put on the trace span, so a duplicate can be found in Jaeger)
+    verdict: str = ""
 
 
 class Recorder:
@@ -42,6 +45,7 @@ class Recorder:
             self.started_at = datetime.now(timezone.utc)
             self.expected: dict[str, Expected] = {}
             self.receipts: list[Receipt] = []          # reached the phone
+            self.delivered_ids: set[str] = set()
             self.calls = Counter()                       # every provider call, by outcome
             self.calls_by_provider = Counter()
             self.idem: dict[tuple[str, str], str] = {}   # (provider, key) -> provider_message_id
@@ -85,9 +89,9 @@ class Recorder:
                 rule.used += 1
                 if rule.action == "reject":
                     self.calls["rejected_by_rule"] += 1
-                    return Outcome(422, {"status": "rejected", "error": "oracle rule: reject"})
+                    return Outcome(422, {"status": "rejected", "error": "oracle rule: reject"}, "rejected_by_rule")
                 self.calls["failed_by_rule"] += 1
-                return Outcome(503, {"status": "unavailable", "error": "oracle rule: fail"})
+                return Outcome(503, {"status": "unavailable", "error": "oracle rule: fail"}, "failed_by_rule")
 
             # A real provider remembers idempotency keys *per provider*. A retry to
             # the same provider is absorbed here; the same event sent through a
@@ -96,13 +100,15 @@ class Recorder:
             if self.honor_idempotency and (provider, key) in self.idem:
                 self.calls["idempotent_replay"] += 1
                 return Outcome(200, {"status": "accepted", "provider_message_id": self.idem[(provider, key)],
-                                     "idempotent_replay": True})
+                                     "idempotent_replay": True}, "idempotent_replay")
 
             pmid = f"{provider}-{uuid.uuid4().hex[:12]}"
             self.idem[(provider, key)] = pmid
+            verdict = "duplicate" if receipt.event_id in self.delivered_ids else "delivered"
+            self.delivered_ids.add(receipt.event_id)
             self.receipts.append(receipt)
             self.calls["delivered"] += 1
-            return Outcome(200, {"status": "accepted", "provider_message_id": pmid})
+            return Outcome(200, {"status": "accepted", "provider_message_id": pmid}, verdict)
 
     # ---- reporting ---------------------------------------------------------
 

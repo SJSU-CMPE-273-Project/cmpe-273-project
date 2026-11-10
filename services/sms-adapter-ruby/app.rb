@@ -4,6 +4,7 @@ require "sinatra/base"
 require_relative "lib/pii"
 require_relative "lib/fault_mode"
 require_relative "lib/provider_client"
+require_relative "lib/telemetry"
 
 # SMS adapter: the delivery worker POSTs one message here; we hand it to the
 # SMS "provider" and translate the outcome into a status code the worker can act on.
@@ -101,8 +102,14 @@ class SmsAdapter < Sinatra::Base
       provider: settings.provider_name,
       adapter_received_at: Time.now.utc.iso8601(3)
     }
-    traceparent = request.env["HTTP_TRACEPARENT"] || msg["traceparent"]
-    result = settings.provider.deliver(payload, traceparent: traceparent)
+    header_tp = request.env["HTTP_TRACEPARENT"]
+    traceparent = header_tp || msg["traceparent"]
+    # With tracing on, Net::HTTP instrumentation replaces this header with the
+    # client span's own traceparent (a child of ours). With it off, we pass the
+    # incoming one through unchanged.
+    result = OpenTelemetry::Context.with_current(Telemetry.parent_context(header_tp, msg["traceparent"])) do
+      settings.provider.deliver(payload, traceparent: traceparent)
+    end
 
     case result.kind
     when :accepted
@@ -117,6 +124,7 @@ class SmsAdapter < Sinatra::Base
   # One place builds both the HTTP answer and the (masked) log line.
   def reply(code, status, event_id, started, error: nil, provider_message_id: nil, recipient: nil, body: nil)
     retryable = [503, 504].include?(code)
+    Telemetry.annotate(event_id: event_id, provider: settings.provider_name, result: status, retryable: retryable)
     log("send.#{status}", event_id: event_id, code: code, ms: now_ms - started, error: error,
         recipient: recipient && PII.mask_recipient(recipient), body: body && PII.mask_body(body))
     out = { status: status, event_id: event_id, provider: settings.provider_name, retryable: retryable }
@@ -145,7 +153,8 @@ class SmsAdapter < Sinatra::Base
   end
 
   def log(event, **fields)
-    line = { ts: Time.now.utc.iso8601(3), svc: "sms-adapter", provider: settings.provider_name, event: event }
+    line = { ts: Time.now.utc.iso8601(3), svc: "sms-adapter", provider: settings.provider_name, event: event,
+             trace_id: Telemetry.trace_id }.compact
     $stdout.puts JSON.generate(line.merge(fields.compact))
   end
 
