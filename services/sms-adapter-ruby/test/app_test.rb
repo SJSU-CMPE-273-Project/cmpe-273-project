@@ -20,6 +20,7 @@ class AppTest < Minitest::Test
   def setup
     SmsAdapter.set :provider, ProviderClient.new(url: PROVIDER, read_timeout: 1)
     SmsAdapter.set :fault, FaultMode.new
+    SmsAdapter.set :bulkhead, Bulkhead.new(8)
     SmsAdapter.set :admin_token, ""
     @log = StringIO.new
     @real_stdout = $stdout
@@ -131,5 +132,48 @@ class AppTest < Minitest::Test
     out = send_msg
     assert_equal 200, last_response.status
     assert_match(/\Asim-/, out["provider_message_id"])
+  end
+
+  # ---- bulkhead + back pressure ---------------------------------------------
+
+  def test_full_bulkhead_answers_429_with_retry_after
+    stub_request(:post, PROVIDER).to_return(status: 200, body: '{"provider_message_id":"p-1"}')
+    SmsAdapter.set :bulkhead, Bulkhead.new(1)
+    gate = Queue.new
+    holder = Thread.new { SmsAdapter.settings.bulkhead.try_run { gate.pop } } # a slow call holds the only slot
+    sleep 0.01 until SmsAdapter.settings.bulkhead.in_flight == 1
+
+    out = send_msg
+    assert_equal 429, last_response.status
+    assert_equal "1", last_response.headers["Retry-After"]
+    assert_equal({ "status" => "busy", "retryable" => true }, out.slice("status", "retryable"))
+    assert_requested :post, PROVIDER, times: 0 # refused before touching the provider
+
+    gate << :done
+    holder.join
+    assert_equal 200, (send_msg && last_response.status) # slot freed, back to normal
+  end
+
+  def test_slow_provider_only_uses_its_slots_and_health_stays_up
+    SmsAdapter.set :bulkhead, Bulkhead.new(2)
+    SmsAdapter.settings.fault.update(mode: "timeout", timeout_seconds: 0.5)
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    results = Array.new(5) do
+      Thread.new do
+        res = Rack::MockRequest.new(SmsAdapter).post("/send", input: JSON.generate(MSG),
+                                                      "CONTENT_TYPE" => "application/json")
+        [res.status, Process.clock_gettime(Process::CLOCK_MONOTONIC) - started]
+      end
+    end
+    sleep 0.1
+    health = Rack::MockRequest.new(SmsAdapter).get("/health")
+    results = results.map(&:value)
+
+    assert_equal [429, 429, 429, 504, 504], results.map(&:first).sort
+    assert results.select { |code, _| code == 429 }.all? { |_, secs| secs < 0.3 }, "429s must be immediate"
+    assert_equal 200, health.status
+    bh = JSON.parse(health.body)["bulkhead"]
+    assert_equal [2, 2], [bh["max_in_flight"], bh["in_flight"]] # answered while both slots were busy
+    assert_equal 3, SmsAdapter.settings.bulkhead.rejected
   end
 end
