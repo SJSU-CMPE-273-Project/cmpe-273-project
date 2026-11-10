@@ -68,6 +68,17 @@ ledger: connected (1 expired/dead-lettered)
 | `P99_TARGET_MS` | `2000` | Latency target |
 | `HONOR_IDEMPOTENCY` | `true` | Act like a real provider (see above) |
 | `ADMIN_TOKEN` | *(unset)* | Protects the harness endpoints |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | *(unset)* | Turns on tracing, e.g. `http://jaeger:4318` |
+
+## Tracing (OpenTelemetry)
+Off unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set. When on, each provider call (`POST /sms|/push|/email`) is a server span that continues the adapter's trace. The oracle is the last hop: the message reached the phone.
+
+Each span carries `relayguard.event_id`, `account_id`, `sequence`, `provider` and **`verdict`**: `delivered`, `duplicate`, `idempotent_replay`, `failed_by_rule` or `rejected_by_rule`. When the report says **no duplicates: FAIL**, search Jaeger (service `oracle`, tag `relayguard.verdict=duplicate`) to open the exact trace and see which hop sent the second copy. `/health` is not traced.
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318 docker compose --profile obs up -d --build jaeger oracle sms-adapter-primary sms-adapter-secondary
+open http://localhost:16686
+```
 
 State is kept in memory on purpose. The oracle is test equipment, and each run starts with a reset.
 
@@ -76,6 +87,6 @@ State is kept in memory on purpose. The oracle is test equipment, and each run s
 docker compose up -d --build oracle sms-adapter-primary sms-adapter-secondary toxiproxy postgres
 curl localhost:18080/report?format=text
 
-# unit tests (23)
+# unit tests (27)
 docker build --target test -t oracle:test harness/oracle && docker run --rm oracle:test
 ```

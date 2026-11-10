@@ -432,11 +432,20 @@ The ops agent is the only part of RelayGuard that uses an LLM, so token cost sca
 
 ### How We Work
 
-- **Process:** design thinking first, then work tracked in **Jira**, one epic per lane
-- **Lanes:**
-  1. Ingest and producers
-  2. Delivery core
-  3. Adapters and reliability harness
-  4. Ops Console, platform and course extras
+- **Process:** design thinking first, then work tracked on **GitHub** in this repo (not Jira): one issue per task, and one **milestone per sprint**
+- **Lanes** (each lane has a `lane-N` label; shared work uses `team`):
+  1. Ingest and producers: Y-Nha
+  2. Delivery core: Aaron
+  3. Adapters and reliability harness: Pooja
+  4. Ops Console, platform and course extras: Katherine
+- **Sprints** (GitHub milestones; see [Issues](https://github.com/SJSU-CMPE-273-Project/cmpe-273-project/issues) and [Milestones](https://github.com/SJSU-CMPE-273-Project/cmpe-273-project/milestones)):
+
+  | Sprint | Dates | Goal |
+  |---|---|---|
+  | Sprint 1 | Nov 10–18 | Happy path end to end; retries, failover, DLQ |
+  | Sprint 2 | Nov 19–26 | Agent, security, harness T1–T7, deploy |
+  | Sprint 3 | Nov 27–30 | Failure-testing review |
+  | Sprint 4 | Dec 1–7 | Final demo: landing page, IEEE report, README |
+- **Workflow:** branch per issue (`laneN/<topic>`), PR into `main` that says `Closes #<issue>`, one teammate reviews
 - **Shared work:** design thinking, token economics, review slides
 - **Milestones:** Nov 4 contract frozen · Nov 11 happy path end to end · Nov 18 guardrails and failover · Nov 23 agent and security · Nov 30 failure-testing review · Dec 7 live demo

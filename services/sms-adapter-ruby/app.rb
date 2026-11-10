@@ -3,7 +3,9 @@ require "time"
 require "sinatra/base"
 require_relative "lib/pii"
 require_relative "lib/fault_mode"
+require_relative "lib/bulkhead"
 require_relative "lib/provider_client"
+require_relative "lib/telemetry"
 
 # SMS adapter: the delivery worker POSTs one message here; we hand it to the
 # SMS "provider" and translate the outcome into a status code the worker can act on.
@@ -26,6 +28,11 @@ class SmsAdapter < Sinatra::Base
       fail_rate: ENV.fetch("FAIL_RATE", "0"),
       timeout_seconds: ENV.fetch("TIMEOUT_SECONDS", "30")
     )
+    # Bulkhead: at most MAX_IN_FLIGHT provider calls at once. Kept below Puma's
+    # thread count (8-16) so /health and /admin still answer when the provider
+    # is slow. 0 turns it off.
+    set :bulkhead, Bulkhead.new(ENV.fetch("MAX_IN_FLIGHT", "8"))
+    set :retry_after, Integer(ENV.fetch("RETRY_AFTER_SECONDS", "1"))
     # We write our own masked logs; Rack's default access log is fine (no bodies),
     # but Sinatra's error pages could echo input, so keep them off.
     set :show_exceptions, false
@@ -37,7 +44,8 @@ class SmsAdapter < Sinatra::Base
 
   get "/health" do
     json(status: "ok", provider: settings.provider_name,
-         simulated: settings.provider.simulated?, fault: settings.fault.to_h)
+         simulated: settings.provider.simulated?, fault: settings.fault.to_h,
+         bulkhead: settings.bulkhead.to_h)
   end
 
   post "/send" do
@@ -51,17 +59,10 @@ class SmsAdapter < Sinatra::Base
     event_id = msg["event_id"]
     started = now_ms
 
-    case settings.fault.pick
-    when "fail"
-      reply(503, "unavailable", event_id, started, error: "fault injected: fail")
-    when "reject"
-      reply(422, "rejected", event_id, started, error: "fault injected: reject")
-    when "timeout"
-      sleep settings.fault.timeout_seconds
-      reply(504, "timeout", event_id, started, error: "fault injected: timeout")
-    else
-      forward(msg, event_id, started)
-    end
+    # The block always ends in reply/halt, so try_run only returns (false)
+    # when the bulkhead was full and the block never ran.
+    admitted = settings.bulkhead.try_run { handle(msg, event_id, started) }
+    busy(event_id, started) unless admitted
   end
 
   # ---- chaos control (used by harness/chaos scripts) ----------------------
@@ -89,6 +90,29 @@ class SmsAdapter < Sinatra::Base
 
   private
 
+  def handle(msg, event_id, started)
+    case settings.fault.pick
+    when "fail"
+      reply(503, "unavailable", event_id, started, error: "fault injected: fail")
+    when "reject"
+      reply(422, "rejected", event_id, started, error: "fault injected: reject")
+    when "timeout"
+      # Holds a bulkhead slot while it hangs, like a real slow provider would.
+      sleep settings.fault.timeout_seconds
+      reply(504, "timeout", event_id, started, error: "fault injected: timeout")
+    else
+      forward(msg, event_id, started)
+    end
+  end
+
+  # Back pressure: answer at once instead of queueing. The worker retries
+  # after Retry-After (same event_id, so no duplicate), or fails over.
+  def busy(event_id, started)
+    headers "Retry-After" => settings.retry_after.to_s
+    reply(429, "busy", event_id, started,
+          error: "adapter at capacity (#{settings.bulkhead.max} calls in flight)")
+  end
+
   def forward(msg, event_id, started)
     # Pass through the fields the oracle needs for its checks (order, latency).
     payload = {
@@ -101,8 +125,14 @@ class SmsAdapter < Sinatra::Base
       provider: settings.provider_name,
       adapter_received_at: Time.now.utc.iso8601(3)
     }
-    traceparent = request.env["HTTP_TRACEPARENT"] || msg["traceparent"]
-    result = settings.provider.deliver(payload, traceparent: traceparent)
+    header_tp = request.env["HTTP_TRACEPARENT"]
+    traceparent = header_tp || msg["traceparent"]
+    # With tracing on, Net::HTTP instrumentation replaces this header with the
+    # client span's own traceparent (a child of ours). With it off, we pass the
+    # incoming one through unchanged.
+    result = OpenTelemetry::Context.with_current(Telemetry.parent_context(header_tp, msg["traceparent"])) do
+      settings.provider.deliver(payload, traceparent: traceparent)
+    end
 
     case result.kind
     when :accepted
@@ -116,7 +146,8 @@ class SmsAdapter < Sinatra::Base
 
   # One place builds both the HTTP answer and the (masked) log line.
   def reply(code, status, event_id, started, error: nil, provider_message_id: nil, recipient: nil, body: nil)
-    retryable = [503, 504].include?(code)
+    retryable = [429, 503, 504].include?(code)
+    Telemetry.annotate(event_id: event_id, provider: settings.provider_name, result: status, retryable: retryable)
     log("send.#{status}", event_id: event_id, code: code, ms: now_ms - started, error: error,
         recipient: recipient && PII.mask_recipient(recipient), body: body && PII.mask_body(body))
     out = { status: status, event_id: event_id, provider: settings.provider_name, retryable: retryable }
@@ -145,7 +176,8 @@ class SmsAdapter < Sinatra::Base
   end
 
   def log(event, **fields)
-    line = { ts: Time.now.utc.iso8601(3), svc: "sms-adapter", provider: settings.provider_name, event: event }
+    line = { ts: Time.now.utc.iso8601(3), svc: "sms-adapter", provider: settings.provider_name, event: event,
+             trace_id: Telemetry.trace_id }.compact
     $stdout.puts JSON.generate(line.merge(fields.compact))
   end
 

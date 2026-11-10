@@ -24,6 +24,7 @@ from .checks import Expected, Receipt, run_all
 from .ledger import Ledger
 from .recorder import Recorder, Rule
 from .report import render_text
+from . import telemetry
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("oracle")
@@ -61,7 +62,7 @@ def pick(d: dict, *names: str) -> Any:
     return None
 
 
-def create_app(recorder: Recorder | None = None, ledger: Ledger | None = None) -> FastAPI:
+def create_app(recorder: Recorder | None = None, ledger: Ledger | None = None, span_exporter=None) -> FastAPI:
     app = FastAPI(title="RelayGuard oracle", docs_url="/docs")
     app.state.recorder = recorder or Recorder(honor_idempotency=_env_bool("HONOR_IDEMPOTENCY", True))
     app.state.ledger = ledger or Ledger(os.environ.get("DATABASE_URL"))
@@ -110,11 +111,14 @@ def create_app(recorder: Recorder | None = None, ledger: Ledger | None = None) -
             occurred_at=parse_time(msg.get("occurred_at")),
         )
         out = rec().receive(provider=provider, idempotency_key=idempotency_key, receipt=receipt)
+        telemetry.annotate(event_id=receipt.event_id, account_id=receipt.account_id,
+                           sequence=receipt.sequence, provider=provider, verdict=out.verdict)
         # Log ids only. The oracle never stores or prints the phone number or text.
-        log.info(json.dumps({"svc": "oracle", "event": "provider.call", "provider": provider,
-                             "event_id": receipt.event_id, "account_id": receipt.account_id,
-                             "sequence": receipt.sequence, "code": out.status,
-                             "replay": out.body.get("idempotent_replay", False)}))
+        line = {"svc": "oracle", "event": "provider.call", "provider": provider,
+                "event_id": receipt.event_id, "account_id": receipt.account_id,
+                "sequence": receipt.sequence, "code": out.status, "verdict": out.verdict,
+                "trace_id": telemetry.trace_id()}
+        log.info(json.dumps({k: v for k, v in line.items() if v is not None}))
         return JSONResponse(out.body, status_code=out.status)
 
     # Explicit paths, not "/{channel}", so they can't shadow the harness routes below.
@@ -195,6 +199,7 @@ def create_app(recorder: Recorder | None = None, ledger: Ledger | None = None) -
         rec().clear_rules()
         return []
 
+    telemetry.instrument(app, exporter=span_exporter)
     return app
 
 
