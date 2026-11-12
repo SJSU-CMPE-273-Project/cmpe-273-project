@@ -118,6 +118,26 @@ services:
       PARTITIONS: ${KAFKA_PARTITIONS:-6}
     restart: "no"
 
+  # ------------------------------------------------------------------ Ingest
+  ingest-bridge:
+    build:
+      context: .
+      dockerfile: services/ingest-bridge-go/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      iggy-init:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-relayguard}:${POSTGRES_PASSWORD:-relayguard}@postgres:5432/${POSTGRES_DB:-relayguard}
+      IGGY_TCP_ADDRESS: iggy:8090
+      IGGY_ROOT_USERNAME: ${IGGY_ROOT_USERNAME:-iggy}
+      IGGY_ROOT_PASSWORD: ${IGGY_ROOT_PASSWORD:-Secret123}
+      KAFKA_BROKERS: kafka:9092
+    restart: unless-stopped
+
   # --------------------------------------------------------------- Temporal
   # Temporal dev server: frontend gRPC on 7233, web UI on 8233.
   # Workflow history is kept in a file on a volume, so killing a *worker*

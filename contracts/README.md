@@ -24,7 +24,7 @@ compatibility rules apply: do not reuse tags or enum numbers. Unknown future
 fields are handled by the generated binary decoder. Headers are optional and
 must not be required for decoding. The bridge's tested codec is
 `contracts.Decode` → `contracts.KafkaRecord`; the TCP probe also exercises it.
-This step does not implement Kafka forwarding or delivery processing.
+The bridge forwards these records to Kafka. Lane 2 owns delivery processing.
 
 ProtoJSON uses lowerCamelCase field names, symbolic enum names, UTC `Z`
 timestamps with 0/3/6/9 fractional digits, decimal-string `sequence`, ordered
@@ -42,7 +42,7 @@ PostgreSQL `BIGINT` supplies the upper bound and `CHECK (sequence > 0)` supplies
 the lower bound. Values beyond that range are rejected, never wrapped or
 truncated. Exhausting an account's sequence stops that producer.
 
-Fresh databases load both init SQL files. For an existing volume, apply
+Fresh databases load the init SQL files in order. For an existing volume, apply
 `infra/postgres/init/002_sequence_range.sql` with `psql -v ON_ERROR_STOP=1`.
 It validates existing data and is safe to re-run. It does not erase data.
 
@@ -133,12 +133,12 @@ do not use `docker compose down -v` when testing resume.
 The Go probe polls with `autoCommit=false` and explicitly stores the **last
 processed offset**, not the next offset. It derives its next cursor from the
 actual returned record offset; offsets can have gaps after server recovery.
-Its dedicated smoke groups never move `ingest-bridge` offsets. This probe's
-successful handling is validation plus a binary roundtrip; the production
-bridge must commit only after durable Kafka acknowledgement. A dedup insert
-before a Kafka write by itself is insufficient: a crash between them loses
-an event. The next bridge step needs a durable outbox/recovery protocol, and
-Lane 2 must tolerate the publish-ack/offset-commit duplicate window.
+Its dedicated smoke groups never move `ingest-bridge` offsets. The bridge
+records `pending` before publishing, records `published` after the Kafka
+acknowledgement, and then commits the Iggy offset. The
+[bridge runbook](../services/ingest-bridge-go/README.md) covers retention and
+recovery. The [Lane 2 handoff](../services/delivery-worker-go/README.md) covers
+duplicate Kafka records and send idempotency.
 
 ## Verification
 

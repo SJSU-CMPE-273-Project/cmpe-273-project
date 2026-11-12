@@ -12,7 +12,7 @@
   "recipient": "+14085550123",
   "body": "Did you spend $912.40 at ACME ELECTRONICS? Reply YES or NO.",
   "occurredAt": "2026-11-09T18:05:00Z",
-  "expiresAt": "2026-11-09T18:35:00Z",
+  "expiresAt": "2026-11-09T18:10:00Z",
   "producer": "auth-otp-ruby",
   "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 }

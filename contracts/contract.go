@@ -101,6 +101,6 @@ func KafkaRecord(m *pb.NotificationRequested) ([]byte, []byte, error) {
 	if m.Sequence == 0 || m.Sequence > math.MaxInt64 || strings.TrimSpace(m.AccountId) == "" {
 		return nil, nil, fmt.Errorf("invalid account or sequence")
 	}
-	value, err := proto.Marshal(m)
+	value, err := (proto.MarshalOptions{Deterministic: true}).Marshal(m)
 	return []byte(m.AccountId), value, err
 }
