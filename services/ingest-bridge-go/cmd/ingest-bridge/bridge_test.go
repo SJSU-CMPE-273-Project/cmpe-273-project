@@ -64,7 +64,7 @@ type memoryLedger struct {
 
 func (*memoryLedger) rejection(context.Context, position) (string, error) { return "", nil }
 
-func (*memoryLedger) reject(context.Context, position, string) error {
+func (*memoryLedger) reject(context.Context, position, string, string) error {
 	return errors.New("unexpected rejection")
 }
 
@@ -187,39 +187,43 @@ func TestCrashRecovery(t *testing.T) {
 	secondID := "861906a1-cf3e-43a5-a8bb-33c343efca22"
 
 	db := connect()
-	run(postgresLedger{db}, func(context.Context, []byte, []byte) error {
+	store := postgresLedger{conn: db, topicCreatedAt: "100"}
+	run(store, func(context.Context, []byte, []byte) error {
 		return errors.New("injected failure before Kafka acceptance")
 	}, messages, commit, "publish_kafka")
 	_ = db.Close(ctx)
 
 	db = connect()
+	store.conn = db
 	assertState(db, 1, 0)
 	if len(offsets) != 0 || len(sent) != 0 {
 		t.Fatal("first failure advanced the offset or published a record")
 	}
 	exec(db, "UPDATE producer_controls SET enabled = false WHERE producer = 'fraud-engine-python'")
-	run(failMarkLedger{postgresLedger{db}}, ack, messages, commit, "mark_published")
+	run(failMarkLedger{store}, ack, messages, commit, "mark_published")
 	_ = db.Close(ctx)
 
 	db = connect()
+	store.conn = db
 	assertState(db, 1, 0)
 	if !slices.Equal(sent, []string{firstID}) || len(offsets) != 0 {
 		t.Fatal("Kafka ack alone advanced the offset or allowed a later record")
 	}
 	exec(db, "UPDATE producer_controls SET enabled = true WHERE producer = 'fraud-engine-python'")
-	run(postgresLedger{db}, ack, messages, func(context.Context, position) error {
+	run(store, ack, messages, func(context.Context, position) error {
 		return errors.New("injected failure storing Iggy offset")
 	}, "commit_iggy")
 	_ = db.Close(ctx)
 
 	db = connect()
+	store.conn = db
 	assertState(db, 0, 1)
-	run(postgresLedger{db}, ack, messages, commit, "")
+	run(store, ack, messages, commit, "")
 	replays := []iggy.IggyMessage{
 		{Header: iggy.MessageHeader{Offset: 4}, Payload: append([]byte(" \n"), first...)},
 		{Header: iggy.MessageHeader{Offset: 5}, Payload: second},
 	}
-	run(postgresLedger{db}, ack, replays, commit, "")
+	run(store, ack, replays, commit, "")
 	if !slices.Equal(sent, []string{firstID, firstID, secondID}) ||
 		!slices.Equal(offsets, []uint64{0, 3, 4, 5}) {
 		t.Fatalf("expected ordered recovery and zero Kafka records for completed replays, got %d sends and offsets %v", len(sent), offsets)
@@ -231,26 +235,60 @@ func TestCrashRecovery(t *testing.T) {
 		{Header: iggy.MessageHeader{Offset: 7}, Payload: bytes.ReplaceAll(first, []byte("private message"), []byte("changed"))},
 		{Header: iggy.MessageHeader{Offset: 8}, Payload: bytes.ReplaceAll(first, []byte("361906a1"), []byte("461906a1"))},
 	}
-	run(postgresLedger{db}, ack, rejected, commit, "")
+	run(store, ack, rejected, commit, "")
 	disabled := bytes.ReplaceAll(first, []byte("361906a1"), []byte("561906a1"))
 	disabled = bytes.ReplaceAll(disabled, []byte(`"sequence":"1"`), []byte(`"sequence":"3"`))
 	disabledBatch := []iggy.IggyMessage{{Header: iggy.MessageHeader{Offset: 9}, Payload: disabled}}
 	exec(db, "UPDATE producer_controls SET enabled = false WHERE producer = 'fraud-engine-python'")
-	run(postgresLedger{db}, ack, disabledBatch, func(context.Context, position) error {
+	run(store, ack, disabledBatch, func(context.Context, position) error {
 		return errors.New("injected failure committing a rejected offset")
 	}, "commit_iggy")
 	exec(db, "UPDATE producer_controls SET enabled = true WHERE producer = 'fraud-engine-python'")
-	run(postgresLedger{db}, ack, disabledBatch, commit, "")
+	run(store, ack, disabledBatch, commit, "")
+	staleTopic := bridge{
+		store: store,
+		checkRejectionTopic: func(context.Context) error {
+			return errors.New("recheck_iggy_topic")
+		},
+	}
+	if err := staleTopic.processBatch(ctx, partition, disabledBatch, commit, slog.New(slog.DiscardHandler)); err == nil ||
+		err.Error() != "recheck_iggy_topic" {
+		t.Fatalf("expected a topic change to stop offset advancement, got %v", err)
+	}
 	for i, reason := range []string{"invalid_json_or_schema", "event_id_conflict", "sequence_conflict", "producer_disabled"} {
-		got, err := (postgresLedger{db}).rejection(ctx, position{partition: partition, offset: uint64(i + 6)})
+		got, err := store.rejection(ctx, position{partition: partition, offset: uint64(i + 6)})
 		if got != reason || err != nil {
 			t.Fatalf("rejection = %q, want %q, error=%v", got, reason, err)
 		}
 	}
-	if len(sent) != 3 || !slices.Equal(offsets, []uint64{0, 3, 4, 5, 6, 7, 8, 9}) {
+	// An uncertain commit leaves the same audit row. A new topic can reuse
+	// that position and admit a valid event even if the old topic rejected it.
+	newTopic := postgresLedger{conn: db, topicCreatedAt: "101"}
+	run(newTopic, ack, disabledBatch, commit, "")
+	var count int
+	if err := db.QueryRow(ctx, "SELECT total FROM ingest_rejection_counts").Scan(&count); err != nil || count != 5 {
+		t.Fatalf("expected four unique rejected positions and one legacy row, got %d, error=%v", count, err)
+	}
+	var id *string
+	if err := db.QueryRow(ctx, `SELECT event_id::text FROM ingest_rejections
+		WHERE topic_created_at = 100 AND source_offset = 9`).Scan(&id); err != nil ||
+		id == nil || *id != "561906a1-cf3e-43a5-a8bb-33c343efca22" {
+		t.Fatalf("disabled event ID = %v, error=%v", id, err)
+	}
+	if err := db.QueryRow(ctx, `SELECT event_id::text FROM ingest_rejections
+		WHERE topic_created_at = 100 AND source_offset = 6`).Scan(&id); err != nil || id != nil {
+		t.Fatalf("malformed JSON supplied an event ID, error=%v", err)
+	}
+
+	var legacyCount int
+	if err := db.QueryRow(ctx, `SELECT count(*) FROM ingest_rejections
+		WHERE topic_created_at = 0 AND event_id IS NULL`).Scan(&legacyCount); err != nil || legacyCount != 1 {
+		t.Fatalf("expected one preserved legacy rejection, got %d, error=%v", legacyCount, err)
+	}
+	if len(sent) != 4 || !slices.Equal(offsets, []uint64{0, 3, 4, 5, 6, 7, 8, 9, 9}) {
 		t.Fatalf("rejections should only advance Iggy, got %d sends and offsets %v", len(sent), offsets)
 	}
-	assertState(db, 0, 2)
+	assertState(db, 0, 3)
 }
 
 func testPostgres(t *testing.T) func() *pgx.Conn {
@@ -288,7 +326,18 @@ func testPostgres(t *testing.T) func() *pgx.Conn {
 	}
 	db := connect()
 	// The base schema already includes the 002 sequence constraints.
-	for _, name := range []string{"001_schema.sql", "003_ingest_recovery.sql", "003_ingest_recovery.sql"} {
+	migrations := []string{
+		"001_schema.sql",
+		"003_ingest_recovery.sql", "003_ingest_recovery.sql",
+		"004_ingest_rejection_identity.sql", "004_ingest_rejection_identity.sql",
+	}
+	for i, name := range migrations {
+		if i == 3 {
+			if _, err := db.Exec(ctx, `INSERT INTO ingest_rejections (partition_id, source_offset, reason)
+				VALUES (0, 0, 'wrong_partition')`); err != nil {
+				t.Fatal(err)
+			}
+		}
 		sql, err := os.ReadFile(filepath.Join(projectRoot, "infra", "postgres", "init", name))
 		if err != nil {
 			t.Fatal(err)

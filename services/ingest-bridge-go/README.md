@@ -10,8 +10,9 @@ including when Iggy assigns offsets with gaps.
    worker owns the wall-clock expiry check, so an OTP that ages during an outage
    can still reach the delivery ledger and be recorded as expired.
 2. Check `producer_controls.enabled` for new events. A missing control row
-   disables admission. Persist rejected source positions and reason codes in
-   `ingest_rejections`. Logs contain counts, partition numbers, and reason codes.
+   disables admission. Persist rejected source positions, reason codes, and
+   parseable event UUIDs in `ingest_rejections`. Logs contain counts, partition
+   numbers, and reason codes.
 3. Insert a `pending` row with a SHA-256 fingerprint of the deterministic
    Protobuf message. A matching pending row resumes from the retained Iggy
    payload, even if the producer has since been disabled. Reusing an event ID
@@ -31,13 +32,16 @@ boundary. A crash between them can produce two Kafka records for one
 
 ## Run locally
 
-A fresh database applies migration 003 automatically. For an existing Compose
-database, apply it before starting the bridge.
+A fresh database applies migrations 003 and 004 automatically. For an existing
+Compose database, apply both before starting the updated bridge.
 
 ```sh
+docker compose stop ingest-bridge
 docker compose up -d postgres
 docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
   < infra/postgres/init/003_ingest_recovery.sql
+docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+  < infra/postgres/init/004_ingest_rejection_identity.sql
 docker compose up -d --build ingest-bridge
 ```
 
@@ -57,6 +61,28 @@ with unlimited age and size retention. Keep the `iggydata` volume and provision
 disk for the expected backlog. Keep the retained messages, offsets, and bridge
 ledger together during recovery.
 
+Rejections are keyed by Iggy's topic creation timestamp, partition, and offset.
+A recreated topic can reuse offsets without inheriting earlier rejections.
+Stop the bridge during Iggy volume or topic maintenance and restart it after
+initialization so it reads the new topic metadata and starts from its group's
+offsets. Migration 004 preserves old rejection rows for audit with an unknown
+topic instance (timestamp zero). A replay of an uncommitted legacy rejection
+is evaluated again because the original topic instance is unknown.
+
+Look up a missing event from an Oracle report in Postgres.
+
+```sql
+SELECT rejected_at, reason, topic_created_at, partition_id, source_offset
+FROM ingest_rejections
+WHERE event_id = '<event_uuid>'
+ORDER BY rejected_at DESC;
+```
+
+The Ops Console can read the cumulative rejection count with
+`SELECT total FROM ingest_rejection_counts`. This includes old topic instances
+and records whose UUID could not be recovered. Replaying a rejection within the
+same topic instance counts once.
+
 ## Verify
 
 Run `go test ./...` for contract validation, OTP expiry, and recovery with injected broker failures. Set
@@ -65,4 +91,5 @@ create schemas, then run
 `go test -count=1 -run TestCrashRecovery ./services/ingest-bridge-go/cmd/ingest-bridge`.
 The test uses a temporary schema and injects failures before Kafka acceptance,
 after Kafka acknowledgement, and during the Iggy commit. It also checks
-completed replays and durable rejection reasons.
+completed replays, durable rejection reasons and IDs, the rejection count, and
+offset reuse across topic instances.

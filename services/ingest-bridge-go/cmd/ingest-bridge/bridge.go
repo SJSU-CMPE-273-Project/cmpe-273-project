@@ -28,14 +28,15 @@ type position struct {
 
 type ledger interface {
 	rejection(context.Context, position) (string, error)
-	reject(context.Context, position, string) error
+	reject(context.Context, position, string, string) error
 	prepare(context.Context, *pb.NotificationRequested, [32]byte) (string, error)
 	markPublished(context.Context, string) error
 }
 
 type bridge struct {
-	store   ledger
-	publish func(ctx context.Context, key, value []byte) error
+	store               ledger
+	publish             func(ctx context.Context, key, value []byte) error
+	checkRejectionTopic func(context.Context) error
 }
 
 func (b bridge) handle(ctx context.Context, pos position, payload []byte) (string, error) {
@@ -44,11 +45,16 @@ func (b bridge) handle(ctx context.Context, pos position, payload []byte) (strin
 		return "", errors.New("read_rejection")
 	}
 	if reason != "" {
+		if b.checkRejectionTopic != nil {
+			if err := b.checkRejectionTopic(ctx); err != nil {
+				return "", err
+			}
+		}
 		return reason, nil
 	}
 	event, reason := validate(pos.partition, payload)
 	if reason != "" {
-		return b.reject(ctx, pos, reason)
+		return b.reject(ctx, pos, reason, contract.RejectedEventID(payload))
 	}
 	key, value, err := contract.KafkaRecord(event)
 	if err != nil {
@@ -56,7 +62,7 @@ func (b bridge) handle(ctx context.Context, pos position, payload []byte) (strin
 	}
 	// Leave headroom below the default Kafka record batch limit for framing.
 	if len(key)+len(value) > 1_000_000 {
-		return b.reject(ctx, pos, "record_too_large")
+		return b.reject(ctx, pos, "record_too_large", event.EventId)
 	}
 	state, err := b.store.prepare(ctx, event, sha256.Sum256(value))
 	if err != nil {
@@ -74,14 +80,19 @@ func (b bridge) handle(ctx context.Context, pos position, payload []byte) (strin
 		}
 		return published, nil
 	case "producer_disabled", "event_id_conflict", "sequence_conflict":
-		return b.reject(ctx, pos, state)
+		return b.reject(ctx, pos, state, event.EventId)
 	default:
 		return "", errors.New("invalid_publish_state")
 	}
 }
 
-func (b bridge) reject(ctx context.Context, pos position, reason string) (string, error) {
-	if err := b.store.reject(ctx, pos, reason); err != nil {
+func (b bridge) reject(ctx context.Context, pos position, reason, eventID string) (string, error) {
+	if b.checkRejectionTopic != nil {
+		if err := b.checkRejectionTopic(ctx); err != nil {
+			return "", err
+		}
+	}
+	if err := b.store.reject(ctx, pos, reason, eventID); err != nil {
 		return "", errors.New("persist_rejection")
 	}
 	return reason, nil

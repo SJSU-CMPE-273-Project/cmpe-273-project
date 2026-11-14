@@ -102,3 +102,20 @@ func TestTraceparentRequiredAndValid(t *testing.T) {
 		t.Fatalf("unsampled trace context rejected: %v", err)
 	}
 }
+
+func TestRejectedEventID(t *testing.T) {
+	const want = "361906a1-cf3e-43a5-a8bb-33c343efca22"
+	for _, tc := range []struct{ doc, want string }{
+		{`{"eventId":"361906A1-CF3E-43A5-A8BB-33C343EFCA22","sequence":"invalid"}`, want},
+		{`{"eventId":"361906a1-cf3e-43a5-a8bb-33c343efca22","eventId":null}`, ""},
+		{`{"eventId":"361906a1-cf3e-43a5-a8bb-33c343efca22"}{}`, ""},
+		{`{"eventId":"arbitrary input"}`, ""},
+		{`{"eventId":42}`, ""},
+		{`{"eventId":`, ""},
+		{`{}`, ""},
+	} {
+		if got := RejectedEventID([]byte(tc.doc)); got != tc.want {
+			t.Errorf("RejectedEventID(%q) = %q, want %q", tc.doc, got, tc.want)
+		}
+	}
+}

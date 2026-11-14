@@ -9,7 +9,12 @@ What we show the professor live during the failure demo.
 2. **DLQ view**: dead-lettered messages with full attempt history.
 3. **Replay** button: re-publishes the original event **with the same `event_id`** (idempotent, can't double-send).
 4. **Guardrails**: per-producer kill switch and rate limits (`producer_controls`, `guardrail_settings`).
-5. **Live metrics**: delivered / retrying / DLQ counts, p99 latency.
+5. **Live metrics**: delivered / retrying / DLQ counts, ingest rejections, p99 latency.
+
+Read the ingest rejection count from Postgres with
+`SELECT total FROM ingest_rejection_counts`. The view returns one cumulative
+count across all retained topic instances, including rows without a parseable
+event ID.
 
 ## Connects to
 | Dependency | Address |

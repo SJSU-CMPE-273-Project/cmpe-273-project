@@ -11,26 +11,28 @@ import (
 )
 
 type postgresLedger struct {
-	conn *pgx.Conn
+	conn           *pgx.Conn
+	topicCreatedAt string
 }
 
 func (s postgresLedger) rejection(ctx context.Context, pos position) (string, error) {
 	var reason string
 	err := s.conn.QueryRow(ctx, `
 		SELECT reason FROM ingest_rejections
-		WHERE partition_id = $1 AND source_offset = $2::text::numeric`,
-		pos.partition, strconv.FormatUint(pos.offset, 10)).Scan(&reason)
+		WHERE topic_created_at = $1::text::numeric AND partition_id = $2 AND source_offset = $3::text::numeric`,
+		s.topicCreatedAt, pos.partition, strconv.FormatUint(pos.offset, 10)).Scan(&reason)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil
 	}
 	return reason, err
 }
 
-func (s postgresLedger) reject(ctx context.Context, pos position, reason string) error {
+func (s postgresLedger) reject(ctx context.Context, pos position, reason, eventID string) error {
 	_, err := s.conn.Exec(ctx, `
-		INSERT INTO ingest_rejections (partition_id, source_offset, reason)
-		VALUES ($1, $2::text::numeric, $3) ON CONFLICT DO NOTHING`,
-		pos.partition, strconv.FormatUint(pos.offset, 10), reason)
+		INSERT INTO ingest_rejections (topic_created_at, partition_id, source_offset, reason, event_id)
+		VALUES ($1::text::numeric, $2, $3::text::numeric, $4, NULLIF($5, '')::uuid)
+		ON CONFLICT DO NOTHING`,
+		s.topicCreatedAt, pos.partition, strconv.FormatUint(pos.offset, 10), reason, eventID)
 	return err
 }
 

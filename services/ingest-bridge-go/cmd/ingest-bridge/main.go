@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -65,7 +66,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// Verify the migration before joining the Iggy group, even on an empty topic.
 	if _, err := db.Exec(setup, `SET synchronous_commit = on;
 		SELECT payload_sha256, publish_state FROM ingested_events LIMIT 0;
-		SELECT reason FROM ingest_rejections LIMIT 0`); err != nil {
+		SELECT topic_created_at, event_id, reason FROM ingest_rejections LIMIT 0`); err != nil {
 		return errors.New("ingest_schema_unavailable")
 	}
 
@@ -78,12 +79,6 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		return errors.New("configure_kafka")
 	}
 	defer kafka.Close()
-	b := bridge{
-		store: postgresLedger{conn: db},
-		publish: func(ctx context.Context, key, value []byte) error {
-			return kafka.ProduceSync(ctx, &kgo.Record{Topic: requestedTopic, Key: key, Value: value}).FirstErr()
-		},
-	}
 
 	c, err := client.NewIggyClient(client.WithTcp(tcp.WithServerAddress(env("IGGY_TCP_ADDRESS", "localhost:8090"))))
 	if err != nil {
@@ -104,11 +99,26 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return errors.New("inspect_iggy_topic")
 	}
-	if details.PartitionsCount != partitions ||
+	if details.CreatedAt == 0 || details.PartitionsCount != partitions ||
 		details.MessageExpiry != iggy.IggyExpiryNeverExpire || details.MaxTopicSize != math.MaxUint64 ||
 		string(details.Options["durability"].Value) != "persisted" ||
 		string(details.Options["consumer_offset_durability"].Value) != "persisted" {
 		return errors.New("iggy_topic_configuration")
+	}
+	b := bridge{
+		store: postgresLedger{conn: db, topicCreatedAt: strconv.FormatUint(details.CreatedAt, 10)},
+		publish: func(ctx context.Context, key, value []byte) error {
+			return kafka.ProduceSync(ctx, &kgo.Record{Topic: requestedTopic, Key: key, Value: value}).FirstErr()
+		},
+		checkRejectionTopic: func(ctx context.Context) error {
+			// The SDK can reconnect during a poll. Recheck the topic before
+			// honoring or persisting a rejection.
+			current, err := c.GetTopic(ctx, stream, topic)
+			if err != nil || current.CreatedAt != details.CreatedAt {
+				return errors.New("recheck_iggy_topic")
+			}
+			return nil
+		},
 	}
 	if err := c.JoinConsumerGroup(setup, stream, topic, group); err != nil {
 		return errors.New("join_iggy_group")

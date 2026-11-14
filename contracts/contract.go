@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	pb "github.com/SJSU-CMPE-273-Project/cmpe-273-project/gen/go/relayguard/v1"
+	"github.com/google/uuid"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -56,6 +57,21 @@ func Decode(data []byte) (*pb.NotificationRequested, error) {
 		return nil, fmt.Errorf("sequence outside BIGINT range")
 	}
 	return m, nil
+}
+
+// RejectedEventID recovers a canonical UUID from a rejected JSON document.
+// It requires valid JSON and unique object keys.
+func RejectedEventID(data []byte) string {
+	if err := uniqueKeys(json.NewDecoder(bytes.NewReader(data))); err != nil {
+		return ""
+	}
+	var fields map[string]json.RawMessage
+	var id string
+	if json.Unmarshal(data, &fields) != nil || json.Unmarshal(fields["eventId"], &id) != nil ||
+		len(id) != 36 || uuid.Validate(id) != nil {
+		return ""
+	}
+	return strings.ToLower(id)
 }
 
 func uniqueKeys(d *json.Decoder) error {
