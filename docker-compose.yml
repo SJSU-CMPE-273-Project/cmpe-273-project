@@ -37,6 +37,8 @@ services:
     environment:
       IGGY_ROOT_USERNAME: ${IGGY_ROOT_USERNAME:-iggy}
       IGGY_ROOT_PASSWORD: ${IGGY_ROOT_PASSWORD:-Secret123}
+      IGGY_SHARDING_CPU_ALLOCATION: "all"
+      IGGY_SHARDING_PIN_CORES: "false"
       IGGY_TCP_ADDRESS: 0.0.0.0:8090
       IGGY_HTTP_ADDRESS: 0.0.0.0:3000
       IGGY_NODE_ADVERTISED_ADDRESS: iggy
@@ -56,6 +58,22 @@ services:
       memlock:
         soft: -1
         hard: -1
+
+  # Retry login until Iggy is ready; create-only and safe on existing volumes.
+  iggy-init:
+    image: python:3.12.12-slim
+    depends_on:
+      iggy:
+        condition: service_started
+    environment:
+      IGGY_HTTP_URL: http://iggy:3000
+      IGGY_ROOT_USERNAME: ${IGGY_ROOT_USERNAME:-iggy}
+      IGGY_ROOT_PASSWORD: ${IGGY_ROOT_PASSWORD:-Secret123}
+      IGGY_PARTITIONS: "6"
+    volumes:
+      - ./infra/iggy/init.py:/init.py:ro
+    entrypoint: ["python", "/init.py"]
+    restart: "no"
 
   # ------------------------------------------------------------ Apache Kafka
   # Single-node KRaft broker (no ZooKeeper).
@@ -99,6 +117,26 @@ services:
       BOOTSTRAP: kafka:9092
       PARTITIONS: ${KAFKA_PARTITIONS:-6}
     restart: "no"
+
+  # ------------------------------------------------------------------ Ingest
+  ingest-bridge:
+    build:
+      context: .
+      dockerfile: services/ingest-bridge-go/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      iggy-init:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-relayguard}:${POSTGRES_PASSWORD:-relayguard}@postgres:5432/${POSTGRES_DB:-relayguard}
+      IGGY_TCP_ADDRESS: iggy:8090
+      IGGY_ROOT_USERNAME: ${IGGY_ROOT_USERNAME:-iggy}
+      IGGY_ROOT_PASSWORD: ${IGGY_ROOT_PASSWORD:-Secret123}
+      KAFKA_BROKERS: kafka:9092
+    restart: unless-stopped
 
   # --------------------------------------------------------------- Temporal
   # Temporal dev server: frontend gRPC on 7233, web UI on 8233.

@@ -449,3 +449,6 @@ The ops agent is the only part of RelayGuard that uses an LLM, so token cost sca
 - **Workflow:** branch per issue (`laneN/<topic>`), PR into `main` that says `Closes #<issue>`, one teammate reviews
 - **Shared work:** design thinking, token economics, review slides
 - **Milestones:** Nov 4 contract frozen · Nov 11 happy path end to end · Nov 18 guardrails and failover · Nov 23 agent and security · Nov 30 failure-testing review · Dec 7 live demo
+
+Contract bindings, Iggy init, producer ownership and live compatibility checks:
+[contract review and runbook](contracts/README.md).

@@ -2,14 +2,13 @@
 -- To re-run after edits: docker compose down -v && docker compose up -d
 
 -- -------------------------------------------------------------------------
--- 1. Ingest dedup. The bridge inserts here BEFORE producing to Kafka:
---      INSERT ... ON CONFLICT (event_id) DO NOTHING
---    0 rows inserted = duplicate from a producer retry -> drop it.
+-- 1. Ingest dedup. Migration 003 adds a content fingerprint and publish
+--    state. Only a published row permits skipping an identical event.
 -- -------------------------------------------------------------------------
 CREATE TABLE ingested_events (
     event_id      UUID        PRIMARY KEY,
     account_id    TEXT        NOT NULL,
-    sequence      BIGINT      NOT NULL,
+    sequence      BIGINT      NOT NULL CONSTRAINT ingested_sequence_positive CHECK (sequence > 0),
     producer      TEXT        NOT NULL,
     received_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (account_id, sequence)          -- one event per account slot
@@ -27,7 +26,7 @@ CREATE TYPE delivery_state AS ENUM (
 CREATE TABLE deliveries (
     event_id      UUID           PRIMARY KEY REFERENCES ingested_events (event_id),
     account_id    TEXT           NOT NULL,
-    sequence      BIGINT         NOT NULL,
+    sequence      BIGINT         NOT NULL CONSTRAINT delivery_sequence_positive CHECK (sequence > 0),
     priority      SMALLINT       NOT NULL,
     state         delivery_state NOT NULL DEFAULT 'pending',
     channel       TEXT,                     -- channel that finally succeeded
