@@ -1,0 +1,5 @@
+== T2: SIGKILL delivery-worker mid-send
+date: 2026-11-17T02:49:36Z   commit: d52e974
+params: rate=20/s down=10s
+
+T2: SKIP (needs delivery-worker (Lane 2) running in compose; nothing to retry, fail over or dead-letter without it)

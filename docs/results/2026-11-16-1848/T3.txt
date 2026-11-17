@@ -1,0 +1,28 @@
+== T3: replay last 1000 events, adapter level (provider idempotency only)
+date: 2026-11-17T02:49:37Z   commit: d52e974
+params: target=adapter rate=100/s
+
+[18:49:38] sending 1000 events
+{"event": "run.start", "target": "adapter", "run_tag": "4a106d", "events": 1000, "seconds": 10.0, "phases": ["10s@100"]}
+[18:49:51] all events accounted for after 0s
+[18:49:51] replaying the last 1000, same event_ids
+provider calls: {"delivered": 1000, "idempotent_replay": 1000}
+
+RelayGuard oracle report   run 14907ab6   started 2026-11-17T02:49:38Z
+
+CHECK                RESULT  DETAIL
+-------------------- ------- --------------------------------------------------
+no loss              PASS    1000 expected: 1000 delivered, 0 missing
+no duplicates        PASS    1000 unique events, 0 delivered more than once
+per-account order    PASS    1000 deliveries across 50 accounts, 0 out of order
+latency              PASS    p50 5 ms, p99 662 ms (target 2000 ms)
+no late delivery     PASS    380 deliveries with a TTL, 0 arrived after expiry
+
+OVERALL: PASS
+
+provider calls: 2000 total (sms_primary 2000)
+  delivered 1000, idempotent replay 1000
+idempotency honoured: True
+ledger: unavailable (OperationalError): expired/dead-lettered events count as missing
+
+T3: PASS

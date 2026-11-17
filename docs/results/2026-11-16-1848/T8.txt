@@ -1,0 +1,6 @@
+T8 slow provider | primary bulkhead max_in_flight=8 | 20 requests | provider hangs 5s
+overflow refused with 429          PASS  12 x 429, 8 x 504 (slots used by the slow provider), 0 other
+429s answered at once              PASS  slowest 429 took 0.137s (limit 1.0s)
+primary /health stays up           PASS  200 in 0.004366s
+secondary unaffected               PASS  200 in 0.049859s
+T8: PASS

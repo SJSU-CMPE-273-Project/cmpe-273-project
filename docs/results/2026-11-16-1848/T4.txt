@@ -1,0 +1,5 @@
+== T4: message N fails 2x, then N+1 and N+2 must wait
+date: 2026-11-17T02:50:09Z   commit: d52e974
+params: target=kafka
+
+T4: SKIP (needs delivery-worker (Lane 2) running in compose; nothing to retry, fail over or dead-letter without it)

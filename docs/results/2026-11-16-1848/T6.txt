@@ -1,0 +1,5 @@
+== T6: primary SMS provider outage 45s
+date: 2026-11-17T02:50:10Z   commit: d52e974
+params: rate=10/s target=kafka
+
+T6: SKIP (needs delivery-worker (Lane 2) running in compose; nothing to retry, fail over or dead-letter without it)

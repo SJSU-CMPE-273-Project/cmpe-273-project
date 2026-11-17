@@ -1,0 +1,5 @@
+== T5: poison message -> DLQ -> replay once
+date: 2026-11-17T02:50:10Z   commit: d52e974
+params: target=kafka
+
+T5: SKIP (needs delivery-worker (Lane 2) running in compose; nothing to retry, fail over or dead-letter without it)
