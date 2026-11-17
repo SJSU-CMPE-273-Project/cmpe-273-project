@@ -194,6 +194,26 @@ services:
     read_only: true
     tmpfs: [/tmp]
 
+  # ----------------------------------------- Load generator (Lane 3, harness)
+  # One-shot tool, not started by `up`. Used by harness/chaos/*.sh, e.g.
+  #   docker compose run --rm load-generator run --target kafka --phase 30s@20
+  # Defaults: oracle at oracle:8080, adapter target through Toxiproxy (21001), Kafka at kafka:9092.
+  load-generator:
+    profiles: ["harness"]
+    build:
+      context: ./harness/load-generator
+      additional_contexts:
+        contracts: ./contracts   # Python classes are generated from the shared .proto
+    environment:
+      ORACLE_URL: http://oracle:8080
+      ORACLE_ADMIN_TOKEN: ${ORACLE_ADMIN_TOKEN:-}
+      ADAPTER_URL: http://toxiproxy:21001
+      KAFKA_BOOTSTRAP: kafka:9092
+    volumes:
+      - loadgen-runs:/runs     # event files kept between runs for replay (T3/T4/T5)
+    read_only: true
+    tmpfs: [/tmp]
+
   # ---------------------------------------------- Observability (optional)
   # OTLP in on 4317 (gRPC) / 4318 (HTTP), trace UI on 16686.
   jaeger:
@@ -211,3 +231,4 @@ volumes:
   iggydata:
   kafkadata:
   temporaldata:
+  loadgen-runs:
