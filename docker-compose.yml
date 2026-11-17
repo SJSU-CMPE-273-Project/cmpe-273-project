@@ -161,6 +161,23 @@ services:
     ports:
       - "18082:8080"
 
+  # ------------------------------------------ Push / email adapter (Lane 3)
+  # Last channel in the failover chain: SMS primary -> SMS secondary -> push/email -> DLQ (T6).
+  # The worker must call it THROUGH Toxiproxy (toxiproxy:21003). Host port 18083 is for debugging.
+  # Forwards to the oracle's /push and /email. Set PUSH_EMAIL_PROVIDER_URL= (empty) to simulate.
+  push-email-adapter:
+    build: ./services/push-email-adapter-node
+    environment:
+      PROVIDER_BASE_URL: ${PUSH_EMAIL_PROVIDER_URL-http://oracle:8080}
+      FAULT_MODE: ${PUSH_EMAIL_FAULT_MODE:-ok}
+      ADMIN_TOKEN: ${ADAPTER_ADMIN_TOKEN:-}
+      OTEL_SERVICE_NAME: push-email-adapter
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}   # empty = tracing off
+    ports:
+      - "18083:8080"
+    read_only: true          # stateless: nothing is written to disk
+    tmpfs: [/tmp]
+
   # ------------------------------------------- Oracle / fake phone (Lane 3)
   # Plays every provider (SMS, push, email) and grades each run:
   # no loss, no duplicates, per-account order, latency. Report: localhost:18080/report?format=text

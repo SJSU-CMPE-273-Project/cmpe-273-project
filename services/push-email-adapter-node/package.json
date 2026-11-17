@@ -1,0 +1,25 @@
+{
+  "name": "relayguard-push-email-adapter",
+  "version": "1.0.0",
+  "private": true,
+  "description": "RelayGuard push/email channel adapter (Lane 3): last fallback channel after both SMS providers",
+  "main": "index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "dependencies": {
+    "@opentelemetry/api": "1.10.0",
+    "@opentelemetry/context-async-hooks": "3.1.1",
+    "@opentelemetry/core": "3.1.1",
+    "@opentelemetry/exporter-trace-otlp-http": "0.301.2",
+    "@opentelemetry/instrumentation": "0.301.2",
+    "@opentelemetry/instrumentation-http": "0.301.2",
+    "@opentelemetry/resources": "3.1.1",
+    "@opentelemetry/sdk-trace": "3.1.1"
+  }
+}
