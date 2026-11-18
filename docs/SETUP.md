@@ -22,7 +22,7 @@ make up-obs                 # adds Jaeger at http://localhost:16686
 
 | Component | Purpose | From your laptop |
 |---|---|---|
-| Postgres 16 | dedup keys, delivery ledger, DLQ, audit | `localhost:5432` (relayguard / relayguard) |
+| Postgres 16 (Alpine) | dedup keys, delivery ledger, DLQ, audit | `localhost:5433` (relayguard / relayguard) |
 | Apache Iggy | producer ingest streams | TCP `localhost:8090`, HTTP `localhost:3000` |
 | Kafka (KRaft) | event backbone | `localhost:9094` |
 | Temporal dev server | durable per-account workflows | gRPC `localhost:7233`, UI http://localhost:8233 |
@@ -62,7 +62,8 @@ Add a block like this to `docker-compose.yml` and open a PR:
 ## Common problems
 - **Kafka clients on your laptop hang:** use `localhost:9094`, not `9092` (9092 is the in-network listener).
 - **Iggy exits immediately:** check `docker compose logs iggy`; usually an old kernel or a seccomp restriction.
-- **Port already in use:** something else is on 3000/5432/8233. Stop it, or change the left side of the port mapping.
+- **Postgres host port already in use:** Compose publishes it on `localhost:5433` by default, leaving the usual local Postgres port 5432 free. Set `POSTGRES_HOST_PORT` in `.env` to choose another host port; containers still connect to `postgres:5432`.
+- **Other port already in use:** something else is on 3000/8233. Stop it, or change the left side of the port mapping.
 - **Schema changes not applied:** init SQL only runs on an empty volume, so run `make reset`.
 
 ## AWS (Dec 7 demo)
