@@ -1,0 +1,76 @@
+{
+  "run_id": "5ff4f8f6",
+  "started_at": "2026-11-20T19:45:48.241828+00:00",
+  "generated_at": "2026-11-20T19:48:08.406061+00:00",
+  "passed": false,
+  "checks": [
+    {
+      "name": "no loss",
+      "result": "PASS",
+      "summary": "6 expected: 6 delivered, 0 missing",
+      "detail": {
+        "expected": 6,
+        "delivered": 6,
+        "missing": 0,
+        "missing_sample": []
+      }
+    },
+    {
+      "name": "no duplicates",
+      "result": "PASS",
+      "summary": "6 unique events, 0 delivered more than once",
+      "detail": {
+        "unique": 6,
+        "duplicated": 0,
+        "sample": []
+      }
+    },
+    {
+      "name": "per-account order",
+      "result": "PASS",
+      "summary": "6 deliveries across 5 accounts, 0 out of order",
+      "detail": {
+        "checked": 6,
+        "accounts": 5,
+        "violations": 0,
+        "sample": []
+      }
+    },
+    {
+      "name": "latency",
+      "result": "FAIL",
+      "summary": "p50 593 ms, p99 3743 ms (target 2000 ms)",
+      "detail": {
+        "count": 6,
+        "p50_ms": 593,
+        "p95_ms": 3743,
+        "p99_ms": 3743,
+        "max_ms": 3743,
+        "p99_target_ms": 2000.0
+      }
+    },
+    {
+      "name": "no late delivery",
+      "result": "PASS",
+      "summary": "6 deliveries with a TTL, 0 arrived after expiry",
+      "detail": {
+        "checked": 6,
+        "late": 0,
+        "sample": []
+      }
+    }
+  ],
+  "provider_calls": {
+    "failed_by_rule": 2,
+    "rejected_by_rule": 3,
+    "delivered": 6
+  },
+  "calls_by_provider": {
+    "sms_primary": 7,
+    "email": 1,
+    "sms_secondary": 2,
+    "push": 1
+  },
+  "honor_idempotency": true,
+  "ledger": "connected (0 expired/dead-lettered)"
+}
