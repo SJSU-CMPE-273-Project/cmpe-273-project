@@ -141,8 +141,20 @@ services:
   # Workflow history is kept in a file on a volume, so killing a *worker*
   # (test T2) resumes from history. For the AWS demo, point workers at a
   # Temporal cluster backed by RDS instead.
+  # Named volumes start owned by root; let the non-root server write SQLite.
+  temporal-data-init:
+    image: temporalio/temporal:${TEMPORAL_VERSION:-latest}
+    user: "0:0"
+    entrypoint: ["chown", "-R", "temporal:temporal", "/data"]
+    volumes:
+      - temporaldata:/data
+    restart: "no"
+
   temporal:
     image: temporalio/temporal:${TEMPORAL_VERSION:-latest}
+    depends_on:
+      temporal-data-init:
+        condition: service_completed_successfully
     command:
       - server
       - start-dev
@@ -154,6 +166,44 @@ services:
       - "8233:8233"   # Web UI
     volumes:
       - temporaldata:/data
+
+  delivery-worker:
+    build:
+      context: .
+      dockerfile: services/delivery-worker-go/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+      kafka-init:
+        condition: service_completed_successfully
+      toxiproxy:
+        condition: service_started
+      sms-adapter-primary:
+        condition: service_started
+      sms-adapter-secondary:
+        condition: service_started
+      push-email-adapter:
+        condition: service_started
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: relayguard
+      KAFKA_BROKERS: kafka:9092
+      DATABASE_URL: postgresql://${POSTGRES_USER:-relayguard}:${POSTGRES_PASSWORD:-relayguard}@postgres:5432/${POSTGRES_DB:-relayguard}
+    read_only: true
+    restart: unless-stopped
+
+  push-email-adapter:
+    build: ./services/push-email-adapter-node
+    environment:
+      PROVIDER_BASE_URL: ${PUSH_EMAIL_PROVIDER_BASE_URL-http://oracle:8080}
+      FAULT_MODE: ${PUSH_EMAIL_FAULT_MODE:-ok}
+      ADMIN_TOKEN: ${ADAPTER_ADMIN_TOKEN:-}
+    ports:
+      - "18083:8080"
+    read_only: true
+    tmpfs: [/tmp]
 
   # -------------------------------------------------------------- Toxiproxy
   # Chaos harness sits between the delivery worker and the SMS adapters so

@@ -11,7 +11,12 @@ import logging
 
 log = logging.getLogger("oracle.ledger")
 
-QUERY = "SELECT event_id::text, state::text FROM deliveries WHERE state IN ('expired', 'dead_lettered')"
+# Keep the historical DLQ exemption after replay advances the current state.
+QUERY = """SELECT d.event_id::text,
+    CASE WHEN d.state = 'expired' THEN 'expired' ELSE 'dead_lettered' END
+    FROM deliveries d
+    WHERE d.state IN ('expired', 'dead_lettered')
+       OR EXISTS (SELECT 1 FROM dead_letters dl WHERE dl.event_id = d.event_id)"""
 
 
 class Ledger:
