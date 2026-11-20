@@ -1,0 +1,18 @@
+{
+  "eventId": "0b9a6c1e-6f43-4c4a-9a51-2f2d8f8f1c11",
+  "accountId": "fraud-0001",
+  "sequence": "42",
+  "type": "NOTIFICATION_TYPE_FRAUD_ALERT",
+  "priority": "PRIORITY_HIGH",
+  "channels": [
+    "CHANNEL_SMS",
+    "CHANNEL_PUSH",
+    "CHANNEL_EMAIL"
+  ],
+  "recipient": "+14085550123",
+  "body": "Did you spend $912.40 at ACME ELECTRONICS? Reply YES or NO.",
+  "occurredAt": "2026-11-09T18:05:00Z",
+  "expiresAt": "2026-11-09T18:35:00Z",
+  "producer": "fraud-engine-python",
+  "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+}

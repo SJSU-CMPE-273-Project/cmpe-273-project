@@ -4,7 +4,7 @@
 
 | Part | Folder | What it does |
 |---|---|---|
-| Load generator | `load-generator/` | **Built.** Sends realistic banking traffic (deposits, fraud alerts, OTPs) to Kafka (the real path) or straight to an adapter, in phases such as `30s@20 2m@200`. Replays the same `event_id`s for T3. See `load-generator/README.md`. |
+| Load generator | [load-generator/](load-generator/README.md) | **Built.** Two tools. `loadgen` (Python, Lane 3) sends realistic banking traffic (deposits, fraud alerts, OTPs) to Kafka (the real path) or straight to an adapter, in phases such as `30s@20 2m@200`. Replays the same `event_id`s for T3. `main.go` (Go, Lane 1) measures ingest throughput through Iggy and the bridge. |
 | Chaos injector | `chaos/` | **Built.** One script per test (`t0_baseline.sh` … `t8_slow_provider.sh`) plus `run_all.sh`. They break things through Toxiproxy's API (`localhost:8474`), adapter fault modes, oracle rules and `docker compose kill/stop`. |
 | Oracle (fake phone) | `oracle/` | **Built.** Acts as the SMS/push/email "provider", records every message and checks the invariants. See `oracle/README.md`. |
 
@@ -53,7 +53,7 @@ An **SLA** is the external promise built on these, for example "fraud alerts del
 | T4 | Fail msg N for one account | `chaos/t4_fail_one.sh` (oracle fails N twice, then accepts) | N, N+1, N+2 in order |
 | T5 | Poison message | `chaos/t5_poison.sh` (oracle always rejects one `event_id`) | lands in DLQ; replay delivers once |
 | T6 | Primary provider outage | `chaos/t6_provider_outage.sh` (Toxiproxy disables `sms_primary`) | failover; report failover time |
-| T7 | 10× burst for 2 min | `chaos/t7_burst.sh` (`--phase 30s@20 --phase 2m@200 --phase 30s@20`) | 0 lost; report peak lag (back pressure: backlog grows, then drains) |
+| T7 | 10× burst for 2 min | `chaos/t7_burst.sh` (`--phase 30s@20 --phase 2m@200 --phase 30s@20`) | 0 lost; report peak lag (back pressure: backlog grows, then drains). Ingest side: `go run ./harness/load-generator --rate 10x` (see load-generator README) |
 | T8 | Slow provider (bulkhead) | `chaos/t8_slow_provider.sh`: primary provider hangs, 20 parallel sends | overflow gets 429 at once; primary `/health` and secondary stay fast |
 
 Toxiproxy examples:

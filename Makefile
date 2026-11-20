@@ -32,3 +32,35 @@ psql:          ## open a SQL shell on the RelayGuard database
 proto-check:   ## compile the contract to make sure it's valid
 	python3 -m grpc_tools.protoc -I contracts/proto --descriptor_set_out=/dev/null \
 	  contracts/proto/relayguard/v1/notification.proto && echo "proto OK"
+
+.PHONY: contracts-generate contracts-build contracts-test iggy-up demo-java demo-python demo-ruby
+contracts-generate: ## requires protoc 33.5 and protoc-gen-go 1.36.10
+	tools/generate-contracts.sh
+
+contracts-build:
+	mkdir -p .state
+	mvn -q -f services/core-banking-java/pom.xml package
+	go build -o .state/iggy-smoke ./services/ingest-bridge-go/cmd/iggy-smoke
+	docker build -t relayguard-ruby-contract -f services/auth-otp-ruby/Dockerfile .
+
+contracts-test: contracts-build
+	go test ./contracts/...
+	python3 tools/test-sequencing.py
+	PYTHONPATH=gen/python python3 tools/test-contracts.py
+
+iggy-up:
+	docker compose up -d iggy
+	docker compose run --rm iggy-init
+
+demo-java:
+	python3 tools/demo-producer.py java --count 2
+
+demo-python:
+	python3 tools/demo-producer.py python --count 2
+
+demo-ruby:
+	python3 tools/demo-producer.py ruby --count 2
+
+.PHONY: iggy-smoke
+iggy-smoke: contracts-build
+	python3 harness/iggy-smoke.py

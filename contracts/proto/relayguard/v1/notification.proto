@@ -51,7 +51,10 @@ message NotificationRequested {
   // Partition key. All messages for one account are delivered in order.
   string account_id = 2;
 
-  // Per-account, strictly increasing, assigned by the producer.
+  // Per-account, strictly increasing, assigned by the sole account owner.
+  // Application range: 1..9223372036854775807 (PostgreSQL BIGINT).
+  // ProtoJSON MUST encode sequence as a decimal string.
+  // Demo pools are disjoint; see contracts/README.md.
   // The oracle checks delivered sequence numbers never go backwards.
   uint64 sequence = 3;
 

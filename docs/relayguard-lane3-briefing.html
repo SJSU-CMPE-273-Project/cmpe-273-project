@@ -317,7 +317,7 @@ ledger: connected (1 expired/dead-lettered)</div>
       <thead><tr><th>Requirement</th><th>Where it shows up</th><th>Owner</th></tr></thead>
       <tbody>
         <tr><td>Happy path producer → phone</td><td>One message end to end by Nov 11. The phone end (adapters + oracle) is ready.</td><td>All lanes</td></tr>
-        <tr><td>Fix Postgres on Apple Silicon</td><td><code>postgres:16</code> crashes on start on Pooja's Mac; <code>postgres:16-alpine</code> works. Decide before Nov 11.</td><td>Lane 4</td></tr>
+        <tr><td>Fix Postgres on Apple Silicon</td><td>Use <code>postgres:16-alpine</code>; publish the host port on 5433 by default to avoid local Postgres conflicts.</td><td>Lane 4 · configured</td></tr>
         <tr><td>Design thinking (d.school)</td><td>Personas (bank customer, fraud analyst, on-call engineer), empathy map, as-is vs to-be</td><td>Team</td></tr>
         <tr><td>Commit control and rollback</td><td>Postgres WAL, transactional outbox, append-only log, idempotency keys, saga; 2PC considered and rejected</td><td>Lanes 1–2</td></tr>
         <tr><td>Agentic harness, prompts, token economics</td><td>DLQ agent with versioned system prompts in the repo and a cost estimate</td><td>Lane 4</td></tr>
