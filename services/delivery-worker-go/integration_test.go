@@ -3,8 +3,10 @@ package delivery
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"github.com/jackc/pgx/v5"
 	"net/http"
 	"os"
 	"testing"
@@ -28,6 +30,14 @@ func TestComposeDelivery(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
+	dsn := os.Getenv("DELIVERY_TEST_DATABASE_URL")
+	if dsn == "" {
+		dsn = "postgresql://relayguard:relayguard@localhost:5432/relayguard"
+	}
+	db, err := pgx.Connect(ctx, dsn)
+	require.NoError(t, err)
+	defer db.Close(context.Background())
+
 	tc, err := client.DialContext(ctx, client.Options{HostPort: "localhost:7233", Namespace: "relayguard"})
 	require.NoError(t, err)
 	defer tc.Close()
@@ -91,6 +101,9 @@ func TestComposeDelivery(t *testing.T) {
 	publish := func(e *pb.NotificationRequested) {
 		t.Helper()
 		key, value, err := contracts.KafkaRecord(e)
+		require.NoError(t, err)
+		hash := sha256.Sum256(value)
+		_, err = db.Exec(ctx, `INSERT INTO ingested_events(event_id,account_id,sequence,producer,payload_sha256,publish_state) VALUES($1,$2,$3,$4,$5,'published') ON CONFLICT(event_id) DO NOTHING`, e.EventId, e.AccountId, int64(e.Sequence), e.Producer, hash[:])
 		require.NoError(t, err)
 		require.NoError(t, kafka.ProduceSync(ctx, &kgo.Record{Topic: "notifications.requested", Key: key, Value: value}).FirstErr())
 	}

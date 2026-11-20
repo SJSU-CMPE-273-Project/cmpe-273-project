@@ -44,6 +44,13 @@ func run(ctx context.Context) error {
 		return err
 	}
 	defer temporalClient.Close()
+	if len(os.Args) > 1 && os.Args[1] == "replay" {
+		if len(os.Args) != 4 || strings.TrimSpace(os.Args[3]) == "" {
+			return errors.New("usage: delivery-worker replay EVENT_ID OPERATOR")
+		}
+		return delivery.StartReplay(ctx, temporalClient, os.Args[2], os.Args[3])
+	}
+
 	kafka, err := kgo.NewClient(kgo.SeedBrokers(strings.Split(env("KAFKA_BROKERS", "localhost:9094"), ",")...),
 		kgo.ConsumerGroup("delivery-worker"), kgo.ConsumeTopics("notifications.requested"), kgo.DisableAutoCommit(),
 		kgo.BlockRebalanceOnPoll(), kgo.RequiredAcks(kgo.AllISRAcks()), kgo.RecordDeliveryTimeout(10*time.Second))
@@ -51,18 +58,22 @@ func run(ctx context.Context) error {
 		return err
 	}
 	defer kafka.Close()
-	publishDLQ := func(ctx context.Context, e *pb.NotificationRequested, reason string) error {
-		data, err := proto.Marshal(&pb.DeadLetter{Original: e, Reason: reason, DeadLetteredAt: timestamppb.Now()})
+	publishDLQ := func(ctx context.Context, dl *pb.DeadLetter) error {
+		data, err := proto.Marshal(dl)
 		if err != nil {
 			return errors.New("encode_dlq")
 		}
-		return kafka.ProduceSync(ctx, &kgo.Record{Topic: "notifications.dlq", Key: []byte(e.GetAccountId()), Value: data}).FirstErr()
+		return kafka.ProduceSync(ctx, &kgo.Record{Topic: "notifications.dlq", Key: []byte(dl.GetOriginal().GetAccountId()), Value: data}).FirstErr()
 	}
 	w := worker.New(temporalClient, delivery.TaskQueue, worker.Options{})
 	w.RegisterWorkflow(delivery.AccountWorkflow)
+	w.RegisterWorkflow(delivery.ReplayWorkflow)
 	adapters := &delivery.Adapters{}
-	w.RegisterActivityWithOptions(adapters.Send, activity.RegisterOptions{Name: delivery.AttemptActivity})
-	w.RegisterActivityWithOptions(publishDLQ, activity.RegisterOptions{Name: delivery.DeadLetterActivity})
+	ledger := &delivery.Ledger{DSN: env("DATABASE_URL", "postgresql://relayguard:relayguard@localhost:5432/relayguard"), Adapters: adapters, Publish: publishDLQ}
+	w.RegisterActivityWithOptions(ledger.Send, activity.RegisterOptions{Name: delivery.AttemptActivity})
+	w.RegisterActivityWithOptions(ledger.DeadLetter, activity.RegisterOptions{Name: delivery.DeadLetterActivity})
+	w.RegisterActivityWithOptions(ledger.Expire, activity.RegisterOptions{Name: delivery.ExpireActivity})
+	w.RegisterActivityWithOptions(ledger.LoadReplay, activity.RegisterOptions{Name: delivery.LoadReplayActivity})
 	if err := w.Start(); err != nil {
 		return err
 	}
@@ -78,7 +89,7 @@ func run(ctx context.Context) error {
 			handoff, cancel := context.WithTimeout(ctx, 15*time.Second)
 			event, err := decode(record)
 			if err != nil {
-				err = publishDLQ(handoff, event, "invalid_kafka_record")
+				err = publishDLQ(handoff, &pb.DeadLetter{Original: event, Reason: "invalid_kafka_record", DeadLetteredAt: timestamppb.Now()})
 			} else {
 				err = delivery.Submit(handoff, temporalClient, event)
 			}

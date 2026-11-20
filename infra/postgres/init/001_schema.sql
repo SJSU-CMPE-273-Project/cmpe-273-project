@@ -16,8 +16,8 @@ CREATE TABLE ingested_events (
 
 -- -------------------------------------------------------------------------
 -- 2. Delivery ledger. One row per event; the delivery worker claims a send
---    by moving it to 'delivered' exactly once. This is what makes retries,
---    worker crashes (T2) and replays (T3) safe.
+--    under an event advisory lock, then records provider acceptance. Provider
+--    idempotency covers acceptance before the ledger completion commits.
 -- -------------------------------------------------------------------------
 CREATE TYPE delivery_state AS ENUM (
     'pending', 'retrying', 'delivered', 'expired', 'dead_lettered'
@@ -59,8 +59,8 @@ CREATE TABLE delivery_attempts (
 );
 
 -- -------------------------------------------------------------------------
--- 4. Dead letters + replay. Replay re-publishes with the SAME event_id, so
---    the ledger above still guarantees at most one send.
+-- 4. Dead letters + replay. Migration 005 adds the original payload and replay
+--    claim. Operator replay uses the SAME event_id and provider idempotency key.
 -- -------------------------------------------------------------------------
 CREATE TABLE dead_letters (
     event_id         UUID        PRIMARY KEY REFERENCES deliveries (event_id),
