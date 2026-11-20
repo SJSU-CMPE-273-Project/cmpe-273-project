@@ -4,7 +4,7 @@
 
 | Part | Folder | What it does |
 |---|---|---|
-| Load generator | `load-generator/` | Replays realistic banking traffic (deposits, fraud alerts, OTPs) at normal and burst (10×) rates. |
+| Load generator | [load-generator/](load-generator/README.md) | Publishes synthetic fraud alerts at normal and burst (10×) rates and can register them with the Oracle. |
 | Chaos injector | `chaos/` | Scripts against Toxiproxy's API (`localhost:8474`), adapter fault modes and `docker compose kill/stop` to break things on cue. **T8 built:** `chaos/t8_slow_provider.sh`. |
 | Oracle (fake phone) | `oracle/` | **Built.** Acts as the SMS/push/email "provider", records every message and checks the invariants. See `oracle/README.md`. |
 
@@ -41,7 +41,7 @@ An **SLA** is the external promise built on these, for example "fraud alerts del
 | T4 | Fail msg N for one account | oracle rejects `event_id` N, then accepts | N, N+1, N+2 in order |
 | T5 | Poison message | oracle always rejects one `event_id` | lands in DLQ; replay delivers once |
 | T6 | Primary provider outage | Toxiproxy: disable `sms_primary` | failover; report failover time |
-| T7 | 10× burst for 2 min | load-generator `--rate 10x --duration 120s` | 0 lost; report peak lag (back pressure: backlog grows, then drains) |
+| T7 | 10× burst for 2 min | `go run ./harness/load-generator --rate 10x --duration 120s --oracle-url http://localhost:18080` | 0 lost; report peak lag (back pressure: backlog grows, then drains) |
 | T8 | Slow provider (bulkhead) | `chaos/t8_slow_provider.sh`: primary provider hangs, 20 parallel sends | overflow gets 429 at once; primary `/health` and secondary stay fast |
 
 Toxiproxy examples:
