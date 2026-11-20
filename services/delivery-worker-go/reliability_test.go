@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -202,6 +203,69 @@ func TestRateLimitRespectsExpiry(t *testing.T) {
 	require.NoError(t, env.GetWorkflowError())
 	require.Equal(t, 2*time.Second, env.Now().Sub(start))
 	env.AssertExpectations(t)
+}
+
+func TestT8BackPressureRetriesSameEvent(t *testing.T) {
+	env := newEnv(t)
+	var times []time.Time
+	a := &Adapters{Client: &http.Client{Transport: transport(func(req *http.Request) (*http.Response, error) {
+		require.Equal(t, "21001", req.URL.Port())
+		require.Equal(t, "event-1", req.Header.Get("Idempotency-Key"))
+		var payload map[string]any
+		require.NoError(t, json.NewDecoder(req.Body).Decode(&payload))
+		require.Equal(t, "event-1", payload["event_id"])
+		times = append(times, env.Now())
+		code, body := 429, `{"status":"busy","retryable":true}`
+		if len(times) == 7 {
+			code, body = 200, `{"event_id":"event-1","status":"accepted","provider_message_id":"ok"}`
+		}
+		return &http.Response{StatusCode: code, Header: http.Header{"Retry-After": []string{"1"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}}
+	env.OnActivity(AttemptActivity, mock.Anything, mock.Anything).Return(a.Send)
+	env.ExecuteWorkflow(func(ctx workflow.Context) error { return deliver(ctx, event(1)) })
+	require.NoError(t, env.GetWorkflowError())
+	require.Len(t, times, 7, "back pressure must not exhaust the failure budget or open the circuit")
+	for i := 1; i < len(times); i++ {
+		require.Equal(t, time.Second, times[i].Sub(times[i-1]))
+	}
+}
+
+func TestRateLimitPreservesProviderFailures(t *testing.T) {
+	code := 503
+	a := &Adapters{Client: &http.Client{Transport: transport(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader("busy"))}, nil
+	})}}
+	send := func() Result {
+		r, err := a.Send(context.Background(), Attempt{event(1), Target{Provider: "sms_primary"}})
+		require.NoError(t, err)
+		return r
+	}
+	for i := 0; i < breakerThreshold-1; i++ {
+		require.True(t, send().Retryable)
+	}
+	code = 429
+	for i := 0; i < 6; i++ {
+		require.True(t, send().RateLimited)
+		require.Equal(t, breakerThreshold-1, a.breakers.states["sms_primary"].failures)
+	}
+	code = 503
+	require.True(t, send().Retryable)
+	require.True(t, send().CircuitOpen)
+
+	// Simulate cooldown without sleeping. A busy probe must release its slot
+	// while preserving the circuit until a later probe proves recovery.
+	s := a.breakers.states["sms_primary"]
+	s.openUntil = time.Now().Add(-time.Second)
+	code = 429
+	for i := 0; i < 2; i++ {
+		require.True(t, send().RateLimited)
+		require.False(t, s.probing)
+		require.Equal(t, breakerThreshold, s.failures)
+		require.False(t, s.openUntil.IsZero())
+	}
+	code = 503
+	require.True(t, send().Retryable)
+	require.True(t, send().CircuitOpen)
 }
 
 func TestRateLimitWithoutJSONDoesNotTripCircuit(t *testing.T) {
