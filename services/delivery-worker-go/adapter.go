@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -22,7 +23,10 @@ var proxyURLs = map[string]string{
 	"email":         "http://toxiproxy:21003/send",
 }
 
-type Adapters struct{ Client *http.Client }
+type Adapters struct {
+	Client   *http.Client
+	breakers providerBreakers
+}
 
 func (a *Adapters) Send(ctx context.Context, attempt Attempt) (result Result, sendErr error) {
 	// A prior activity execution may have reached the provider before a crash.
@@ -44,6 +48,14 @@ func (a *Adapters) Send(ctx context.Context, attempt Attempt) (result Result, se
 	if !ok {
 		return Result{}, errors.New("unknown_provider")
 	}
+	allowed, generation, wait := a.breakers.allow(attempt.Target.Provider, time.Now())
+	if !allowed {
+		return Result{CircuitOpen: true, RetryAfter: wait}, nil
+	}
+	providerFailed := false
+	defer func() {
+		a.breakers.record(attempt.Target.Provider, generation, providerFailed, time.Now())
+	}()
 	payload := map[string]any{"event_id": e.EventId, "account_id": e.AccountId, "sequence": e.Sequence, "recipient": e.Recipient, "body": e.Body}
 	if e.OccurredAt != nil {
 		payload["occurred_at"] = e.OccurredAt.AsTime().Format(time.RFC3339Nano)
@@ -71,9 +83,34 @@ func (a *Adapters) Send(ctx context.Context, attempt Attempt) (result Result, se
 	bounded.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := bounded.Do(req)
 	if err != nil {
-		return Result{Retryable: true, Ambiguous: true}, nil
+		providerFailed = true
+		// A failed dial cannot have submitted the request. Other transport
+		// failures may occur after acceptance and must stay on this provider.
+		var op *net.OpError
+		definitive := errors.As(err, &op) && op.Op == "dial"
+		return Result{Retryable: true, Ambiguous: !definitive}, nil
 	}
 	defer resp.Body.Close()
+	// Status is authoritative even when an upstream proxy returns HTML or
+	// an empty body. A 422 is a permanent rejection of this target.
+	switch resp.StatusCode {
+	case 429:
+		delay := time.Second
+		if seconds, err := strconv.ParseUint(resp.Header.Get("Retry-After"), 10, 32); err == nil {
+			delay = time.Duration(seconds) * time.Second
+		} else if date, err := http.ParseTime(resp.Header.Get("Retry-After")); err == nil {
+			delay = max(0, time.Until(date))
+		}
+		return Result{Retryable: true, RateLimited: true, RetryAfter: delay}, nil
+	case 422:
+		return Result{}, nil
+	case 503:
+		providerFailed = true
+		return Result{Retryable: true}, nil
+	case 504:
+		providerFailed = true
+		return Result{Retryable: true, Ambiguous: true}, nil
+	}
 	var body struct {
 		EventID           string `json:"event_id"`
 		Status            string `json:"status"`
@@ -81,6 +118,7 @@ func (a *Adapters) Send(ctx context.Context, attempt Attempt) (result Result, se
 		ProviderMessageID string `json:"provider_message_id"`
 	}
 	if json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&body) != nil || body.EventID != e.EventId {
+		providerFailed = true
 		return Result{Retryable: true, Ambiguous: true}, nil
 	}
 	switch resp.StatusCode {
@@ -92,22 +130,7 @@ func (a *Adapters) Send(ctx context.Context, attempt Attempt) (result Result, se
 		if body.Status == "invalid" {
 			return Result{Invalid: true}, nil
 		}
-	case 422:
-		if body.Status == "rejected" {
-			return Result{}, nil
-		}
-	case 429:
-		delay := time.Second
-		if seconds, err := strconv.ParseUint(resp.Header.Get("Retry-After"), 10, 32); err == nil {
-			delay = time.Duration(seconds) * time.Second
-		} else if date, err := http.ParseTime(resp.Header.Get("Retry-After")); err == nil && time.Until(date) > 0 {
-			delay = time.Until(date)
-		}
-		return Result{Retryable: true, RetryAfter: delay}, nil
-	case 503:
-		return Result{Retryable: true}, nil
-	case 504:
-		return Result{Retryable: true, Ambiguous: true}, nil
 	}
+	providerFailed = true
 	return Result{Retryable: true, Ambiguous: true}, nil
 }

@@ -65,7 +65,7 @@ func TestAdapterResponses(t *testing.T) {
 	}{
 		{400, `{"event_id":"event-1","status":"invalid"}`, Result{Invalid: true}},
 		{422, `{"event_id":"event-1","status":"rejected"}`, Result{}},
-		{429, `{"event_id":"event-1","status":"busy","retryable":true}`, Result{Retryable: true, RetryAfter: 7 * time.Second}},
+		{429, `{"event_id":"event-1","status":"busy","retryable":true}`, Result{Retryable: true, RateLimited: true, RetryAfter: 7 * time.Second}},
 		{503, `{"event_id":"event-1","status":"unavailable","retryable":true}`, Result{Retryable: true}},
 		{504, `{"event_id":"event-1","status":"timeout","retryable":true}`, Result{Retryable: true, Ambiguous: true}},
 		{200, `garbage`, Result{Retryable: true, Ambiguous: true}},
