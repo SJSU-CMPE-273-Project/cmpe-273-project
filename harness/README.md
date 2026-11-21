@@ -4,8 +4,8 @@
 
 | Part | Folder | What it does |
 |---|---|---|
-| Load generator | [load-generator/](load-generator/README.md) | Publishes synthetic fraud alerts at normal and burst (10×) rates and can register them with the Oracle. |
-| Chaos injector | `chaos/` | Scripts against Toxiproxy's API (`localhost:8474`), adapter fault modes and `docker compose kill/stop` to break things on cue. **T8 built:** `chaos/t8_slow_provider.sh`. |
+| Load generator | [load-generator/](load-generator/README.md) | **Built.** Two tools. `loadgen` (Python, Lane 3) sends realistic banking traffic (deposits, fraud alerts, OTPs) through Iggy and the ingest bridge (the real producer path), to Kafka, or straight to an adapter, in phases such as `30s@20 2m@200`. Replays the same `event_id`s for T3. `main.go` (Go, Lane 1) measures ingest throughput through Iggy and the bridge. |
+| Chaos injector | `chaos/` | **Built.** One script per test (`t0_baseline.sh` … `t8_slow_provider.sh`) plus `run_all.sh`. They break things through Toxiproxy's API (`localhost:8474`), adapter fault modes, oracle rules and `docker compose kill/stop`. |
 | Oracle (fake phone) | `oracle/` | **Built.** Acts as the SMS/push/email "provider", records every message and checks the invariants. See `oracle/README.md`. |
 
 ## Invariants the oracle checks
@@ -14,7 +14,18 @@
 - **Order:** per account, delivered `sequence` never decreases.
 - **Latency:** p50 / p99 from `occurred_at` to provider ack under target.
 
-Each run prints a pass/fail table plus the numbers. Save the output in `docs/results/` for the README.
+Each run prints a pass/fail table plus the numbers.
+
+## Running the tests
+```bash
+make up                                  # platform + adapters + oracle
+harness/chaos/run_all.sh                 # T0-T8 -> docs/results/<timestamp>/ (+ summary.md)
+harness/chaos/run_all.sh t3 t7           # only some
+TARGET=adapter harness/chaos/run_all.sh  # adapter-level variants (T0, T3, T7) work without the worker
+```
+Each script exits **0 PASS, 1 FAIL, 2 SKIP**. A test reports SKIP, not FAIL, when something it needs isn't running. Today that's mostly the delivery worker (Lane 2). Once `delivery-worker` runs in compose, the same scripts run end to end with no changes. Set `WORKER_SERVICE` if its compose name differs, and `WORKER_GROUP` for its Kafka consumer group (T7 lag).
+
+Knobs (env): `RATE`, `OUTAGE_SECONDS` (T1 300, T6 45), `DOWN_SECONDS` (T2), `COUNT` (T3), `FAIL_TIMES` (T4), `BURST_SECONDS` (T7), `DRAIN_TIMEOUT`, `ORACLE_ADMIN_TOKEN`.
 
 ## Service level objectives (draft, for team review)
 The oracle measures the SLIs (service level indicators); these are the targets it grades against. **The numbers are proposals, not measured yet.** Agree on them as a team before the Nov 30 review.
@@ -33,15 +44,16 @@ The oracle measures the SLIs (service level indicators); these are the targets i
 An **SLA** is the external promise built on these, for example "fraud alerts delivered within 30 s, 99.9% of the month". We'd state it on the landing page, but a class project has no customer to owe penalties to.
 
 ## Test matrix (from the proposal)
-| Test | Fault | Chaos command (sketch) | Pass |
+| Test | Fault | Script | Pass |
 |---|---|---|---|
-| T1 | SMS adapter down 5 min | `docker compose stop sms-adapter-primary` | 0 lost after recovery |
-| T2 | Kill worker mid-send | `docker compose kill -s SIGKILL delivery-worker` | 0 dup, 0 lost |
-| T3 | Replay last 1,000 events | load-generator `--replay 1000` | 0 duplicate sends |
-| T4 | Fail msg N for one account | oracle rejects `event_id` N, then accepts | N, N+1, N+2 in order |
-| T5 | Poison message | oracle always rejects one `event_id` | lands in DLQ; replay delivers once |
-| T6 | Primary provider outage | Toxiproxy: disable `sms_primary` | failover; report failover time |
-| T7 | 10× burst for 2 min | `go run ./harness/load-generator --rate 10x --duration 120s --oracle-url http://localhost:18080` | 0 lost; report peak lag (back pressure: backlog grows, then drains) |
+| T0 | none (baseline, 60 s at 20/s) | `chaos/t0_baseline.sh` | all invariants, p99 under target |
+| T1 | SMS adapter down 5 min | `chaos/t1_adapter_down.sh` (`docker compose stop`) | 0 lost after recovery |
+| T2 | Kill worker mid-send | `chaos/t2_kill_worker.sh` (`kill -s SIGKILL`) | 0 dup, 0 lost |
+| T3 | Replay last 1,000 events | `chaos/t3_replay.sh` (`loadgen replay --last 1000`) | 0 duplicate sends |
+| T4 | Fail msg N for one account | `chaos/t4_fail_one.sh` (oracle fails N twice, then accepts) | N, N+1, N+2 in order |
+| T5 | Poison message | `chaos/t5_poison.sh` (oracle always rejects one `event_id`) | lands in DLQ; replay delivers once |
+| T6 | Primary provider outage | `chaos/t6_provider_outage.sh` (Toxiproxy disables `sms_primary`) | failover; report failover time |
+| T7 | 10× burst for 2 min | `chaos/t7_burst.sh` (`--phase 30s@20 --phase 2m@200 --phase 30s@20`) | 0 lost; report peak lag (back pressure: backlog grows, then drains). Ingest side: `go run ./harness/load-generator --rate 10x` (see load-generator README) |
 | T8 | Slow provider (bulkhead) | `chaos/t8_slow_provider.sh`: primary provider hangs, 20 parallel sends | overflow gets 429 at once; primary `/health` and secondary stay fast |
 
 Toxiproxy examples:

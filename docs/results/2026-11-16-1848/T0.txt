@@ -1,0 +1,26 @@
+== T0: baseline, no faults
+date: 2026-11-17T02:48:21Z   commit: d52e974
+params: target=adapter rate=20/s duration=60s
+
+{"event": "run.start", "target": "adapter", "run_tag": "c51a96", "events": 1200, "seconds": 60.0, "phases": ["60s@20"]}
+[18:49:33] all events accounted for after 1s
+load generator: 1200 events at 20.0/s, sink {"target": "adapter", "url": "http://toxiproxy:21001/send", "peak_backlog": 4, "accepted": 1200}
+
+RelayGuard oracle report   run 443ac81c   started 2026-11-17T02:48:22Z
+
+CHECK                RESULT  DETAIL
+-------------------- ------- --------------------------------------------------
+no loss              PASS    1200 expected: 1200 delivered, 0 missing
+no duplicates        PASS    1200 unique events, 0 delivered more than once
+per-account order    PASS    1200 deliveries across 50 accounts, 0 out of order
+latency              PASS    p50 7 ms, p99 67 ms (target 2000 ms)
+no late delivery     PASS    502 deliveries with a TTL, 0 arrived after expiry
+
+OVERALL: PASS
+
+provider calls: 1200 total (sms_primary 1200)
+  delivered 1200
+idempotency honoured: True
+ledger: unavailable (OperationalError): expired/dead-lettered events count as missing
+
+T0: PASS

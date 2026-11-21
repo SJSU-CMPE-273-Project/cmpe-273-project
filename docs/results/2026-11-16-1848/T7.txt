@@ -1,0 +1,29 @@
+== T7: 10x burst for 120s
+date: 2026-11-17T02:50:11Z   commit: d52e974
+params: target=adapter base=20/s peak=200/s
+
+[18:50:11] 30s at 20/s, 120s at 200/s, 30s at 20/s
+{"event": "run.start", "target": "adapter", "run_tag": "2bbf00", "events": 25200, "seconds": 180.0, "phases": ["30s@20", "120s@200", "30s@20"]}
+[18:53:15] all events accounted for after 0s
+load generator: achieved 140.0/s overall, max lateness 0.792s
+adapter back pressure: 131 x 429, peak backlog 2049 messages, gave up 0
+
+RelayGuard oracle report   run 2f123398   started 2026-11-17T02:50:11Z
+
+CHECK                RESULT  DETAIL
+-------------------- ------- --------------------------------------------------
+no loss              PASS    25200 expected: 25200 delivered, 0 missing
+no duplicates        PASS    25200 unique events, 0 delivered more than once
+per-account order    PASS    25200 deliveries across 50 accounts, 0 out of order
+latency              FAIL    p50 21 ms, p99 12462 ms (target 2000 ms)
+no late delivery     PASS    9946 deliveries with a TTL, 0 arrived after expiry
+
+OVERALL: FAIL
+
+provider calls: 25200 total (sms_primary 25200)
+  delivered 25200
+idempotency honoured: True
+ledger: unavailable (OperationalError): expired/dead-lettered events count as missing
+
+graded on every check except: latency (reported above, not graded)
+T7: PASS
