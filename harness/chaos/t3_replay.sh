@@ -12,11 +12,11 @@
 # env: TARGET=kafka COUNT=1000 RATE=100
 set -euo pipefail
 source "$(dirname "$0")/lib/common.sh"
-TARGET=${TARGET:-kafka}; COUNT=${COUNT:-1000}; RATE=${RATE:-100}
-level=$([[ $TARGET == kafka ]] && echo "end to end (worker dedup)" || echo "adapter level (provider idempotency only)")
+TARGET=${TARGET:-$E2E_TARGET}; COUNT=${COUNT:-1000}; RATE=${RATE:-100}
+level=$([[ $TARGET != adapter ]] && echo "end to end (worker dedup)" || echo "adapter level (provider idempotency only)")
 header T3 "replay last $COUNT events, $level" "target=$TARGET rate=${RATE}/s"
 require_up oracle toxiproxy sms-adapter-primary
-[[ $TARGET == kafka ]] && require_worker
+[[ $TARGET != adapter ]] && require_e2e
 
 oracle_reset
 secs=$(python3 -c "import math;print(math.ceil($COUNT/$RATE))")
@@ -26,6 +26,6 @@ fails=0
 wait_accounted || fails=1
 say "replaying the last $COUNT, same event_ids"
 loadgen replay --target "$TARGET" --from /runs/t3.jsonl --last "$COUNT" >/dev/null || fails=1
-sleep "${SETTLE_SECONDS:-$([[ $TARGET == kafka ]] && echo 30 || echo 2)}"
+sleep "${SETTLE_SECONDS:-$([[ $TARGET != adapter ]] && echo 30 || echo 2)}"
 echo "provider calls: $(oq calls)"
 finish $fails

@@ -3,6 +3,7 @@
 
   oracle_query.py check "no loss"          -> PASS / FAIL / SKIP
   oracle_query.py passed [--ignore NAME]   -> exit 0 if every check passed (NAME reported, not graded)
+  oracle_query.py p99                      -> end-to-end p99 in ms for this run
   oracle_query.py last-delivery            -> ISO time of the newest delivery
   oracle_query.py first-after PROVIDERS T  -> seconds from T to the first delivery by one of
                                               PROVIDERS (comma list) after T
@@ -47,6 +48,9 @@ def main(cmd: str, *args: str) -> int:
         ignore = set(args[1:]) if args[:1] == ("--ignore",) else set()
         checks = [c for c in get("/report")["checks"] if c["name"] not in ignore]
         return 0 if all(c["result"] != "FAIL" for c in checks) else 1
+    elif cmd == "p99":
+        lat = next((c for c in get("/report")["checks"] if c["name"] == "latency"), None)
+        print((lat or {}).get("detail", {}).get("p99_ms", ""))
     elif cmd == "last-delivery":
         rows = deliveries()
         print(max(r["received_at"] for r in rows) if rows else "")

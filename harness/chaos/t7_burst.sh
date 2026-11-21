@@ -11,15 +11,15 @@
 # env: TARGET=kafka RATE=20 (base events/s) BURST_SECONDS=120 WORKER_GROUP=delivery-worker
 set -euo pipefail
 source "$(dirname "$0")/lib/common.sh"
-TARGET=${TARGET:-kafka}; RATE=${RATE:-20}; BURST=${BURST_SECONDS:-120}; GROUP=${WORKER_GROUP:-delivery-worker}
+TARGET=${TARGET:-$E2E_TARGET}; RATE=${RATE:-20}; BURST=${BURST_SECONDS:-120}; GROUP=${WORKER_GROUP:-delivery-worker}
 peak=$(python3 -c "print(int($RATE*10))")
 header T7 "10x burst for ${BURST}s" "target=$TARGET base=${RATE}/s peak=${peak}/s"
 require_up oracle toxiproxy sms-adapter-primary
-[[ $TARGET == kafka ]] && require_worker
+[[ $TARGET != adapter ]] && require_e2e
 
 oracle_reset
 LG=$(mktemp); LAG=$(mktemp)
-if [[ $TARGET == kafka ]]; then
+if [[ $TARGET != adapter ]]; then
   ( while :; do
       dc exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:9092 \
         --describe --group "$GROUP" 2>/dev/null | awk '$2=="notifications.requested"{s+=$6} END{print s+0}'
@@ -34,7 +34,7 @@ loadgen run --target "$TARGET" --phase "30s@$RATE" --phase "${BURST}s@$peak" --p
 fails=$lg_ok
 wait_accounted || fails=$((fails + 1))
 echo "load generator: achieved $(summary_field "$LG" 's["achieved_rate"]')/s overall, max lateness $(summary_field "$LG" 's["max_lateness_s"]')s"
-if [[ $TARGET == kafka ]]; then
+if [[ $TARGET != adapter ]]; then
   kill $sampler 2>/dev/null || true
   echo "peak consumer lag ($GROUP): $(sort -n "$LAG" | tail -n 1) messages"
 else

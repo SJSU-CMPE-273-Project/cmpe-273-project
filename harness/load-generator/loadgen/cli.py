@@ -1,6 +1,6 @@
 """Command line. Logs go to stderr; the last stdout line is a JSON summary scripts can parse.
 
-  run     generate traffic by phases:   run --target kafka --phase 30s@20 --phase 2m@200
+  run     generate traffic by phases:   run --target iggy --phase 30s@20 --phase 2m@200
   plan    write events to a file without sending (T4/T5 need the event_ids first)
   replay  send events from a file again, same event_ids (T3, DLQ replay)
 """
@@ -18,7 +18,7 @@ from contextlib import nullcontext
 from .events import EventFactory, parse_mix, restamp
 from .runner import run_schedule
 from .schedule import Phase, offsets, parse_phase, total
-from .sinks import AdapterSink, KafkaSink, NullSink, Oracle
+from .sinks import AdapterSink, IggySink, KafkaSink, NullSink, Oracle
 
 log = logging.getLogger("loadgen")
 
@@ -34,7 +34,10 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--run-tag", default=None, help="account prefix lg-<tag>-NNNN (default random)")
 
     def sending(sp):
-        sp.add_argument("--target", choices=["kafka", "adapter", "none"], default="kafka")
+        sp.add_argument("--target", choices=["iggy", "kafka", "adapter", "none"], default="iggy",
+                        help="iggy = full path through the ingest bridge (what the worker admits)")
+        sp.add_argument("--iggy", default=os.environ.get("IGGY_CONNECTION_STRING", "iggy://iggy:Secret123@iggy:8090"),
+                        help="Iggy connection string (iggy target)")
         sp.add_argument("--adapter-url", default=os.environ.get("ADAPTER_URL", "http://toxiproxy:21001"),
                         help="adapter target; default goes through Toxiproxy so chaos applies")
         sp.add_argument("--kafka-bootstrap", default=os.environ.get("KAFKA_BOOTSTRAP", "kafka:9092"))
@@ -70,6 +73,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def make_sink(a):
+    if a.target == "iggy":
+        return IggySink(a.iggy)
     if a.target == "kafka":
         return KafkaSink(a.kafka_bootstrap, a.topic)
     if a.target == "adapter":

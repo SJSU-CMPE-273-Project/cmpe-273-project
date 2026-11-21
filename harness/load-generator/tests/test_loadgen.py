@@ -10,7 +10,7 @@ from loadgen import cli
 from loadgen.events import EventFactory, parse_mix, restamp, to_adapter_payload, to_expected
 from loadgen.runner import run_schedule
 from loadgen.schedule import Phase, offsets, parse_phase, total
-from loadgen.sinks import AdapterSink, KafkaSink, NullSink, Oracle
+from loadgen.sinks import AdapterSink, IggySink, KafkaSink, NullSink, Oracle
 
 SCHEMA_REQUIRED = {"eventId", "accountId", "sequence", "type", "priority", "channels",
                    "recipient", "body", "occurredAt", "producer"}
@@ -269,6 +269,101 @@ def test_kafka_sink_keys_by_account_and_sends_raw_proto():
     assert topic == "notifications.requested" and key == e["accountId"].encode()
     assert wire.decode(value)["eventId"] == e["eventId"]
     assert sink.stats()["acked"] == 1
+
+
+# ---- iggy sink ----------------------------------------------------------------
+
+class FakeIggy:
+    """Records (partition, [payload, ...]) per call; fails the first `fail` calls."""
+
+    def __init__(self, fail=0):
+        self.calls = []
+        self.fail = fail
+
+    async def send_messages(self, stream, topic, partition, messages):
+        if self.fail:
+            self.fail -= 1
+            raise RuntimeError("connection reset")
+        assert (stream, topic) == ("relayguard", "requests")
+        self.calls.append((partition, list(messages)))
+
+
+async def _no_sleep(_):
+    return None
+
+
+def _iggy_sink(client, **kw):
+    return IggySink("iggy://x", client=client, make_message=lambda p: p, sleep=_no_sleep, **kw)
+
+
+def test_iggy_partition_matches_bridge_formula():
+    import hashlib
+    from loadgen import wire
+    for account in ("acct-1", "lg-abc123-0001", "fraud-load-x-07", "\u00e9"):
+        h = hashlib.sha256(account.encode()).digest()
+        assert wire.iggy_partition(account) == int.from_bytes(h[:4], "big") % 6
+    # Fixed vector so a silent formula change (8 bytes, little-endian, ...) fails loudly.
+    assert wire.iggy_partition("acct-1") == 5
+    assert {wire.iggy_partition(f"lg-t-{i:04d}") for i in range(200)} == set(range(6))
+
+
+def test_iggy_sink_sends_protojson_on_account_partition_in_order():
+    from loadgen import wire
+    client = FakeIggy()
+    f = EventFactory(run_tag="t", accounts=5, seed=3)
+    events = [f.next() for _ in range(60)]
+
+    async def go():
+        sink = _iggy_sink(client)
+        for e in events:
+            sink.submit(e)
+        await sink.drain()
+        return sink.stats()
+
+    stats = asyncio.run(go())
+    assert stats["acked"] == 60 and stats.get("failed", 0) == 0
+    seen = {}
+    for partition, payloads in client.calls:
+        for p in payloads:
+            doc = json.loads(p)  # ProtoJSON text, what the bridge's contract.Decode reads
+            assert wire.iggy_partition(doc["accountId"]) == partition
+            seen.setdefault(doc["accountId"], []).append(int(doc["sequence"]))
+    assert sum(len(v) for v in seen.values()) == 60
+    for seqs in seen.values():
+        assert seqs == sorted(seqs) == list(range(1, len(seqs) + 1))
+
+
+def test_iggy_sink_batches_and_retries_same_batch_after_error():
+    client = FakeIggy(fail=2)
+    f = EventFactory(run_tag="t", accounts=1, seed=4)  # one account -> one partition
+    events = [f.next() for _ in range(25)]
+
+    async def go():
+        sink = _iggy_sink(client, batch_max=10)
+        for e in events:
+            sink.submit(e)
+        await sink.drain()
+        return sink.stats()
+
+    stats = asyncio.run(go())
+    assert [len(b) for _, b in client.calls] == [10, 10, 5]
+    assert stats["send_errors"] == 2 and stats["acked"] == 25 and stats.get("failed", 0) == 0
+    sent = [json.loads(p)["eventId"] for _, b in client.calls for p in b]
+    assert sent == [e["eventId"] for e in events]  # no gap, no reorder after the retry
+
+
+def test_iggy_sink_counts_failed_after_max_attempts():
+    client = FakeIggy(fail=99)
+    e = EventFactory(run_tag="t", seed=5).next()
+
+    async def go():
+        sink = _iggy_sink(client, max_attempts=3)
+        sink.submit(e)
+        await sink.drain()
+        return sink.stats()
+
+    stats = asyncio.run(go())
+    assert stats["failed"] == 1 and stats["send_errors"] == 3  # cli.main exits 1 on "failed"
 
 
 # ---- oracle client + CLI --------------------------------------------------------

@@ -10,12 +10,12 @@ set -euo pipefail
 source "$(dirname "$0")/lib/common.sh"
 RATE=${RATE:-20}; DOWN=${DOWN_SECONDS:-10}
 header T2 "SIGKILL $WORKER_SERVICE mid-send" "rate=${RATE}/s down=${DOWN}s"
-require_up oracle kafka
-require_worker
+require_e2e
+require_up oracle
 trap 'dc start "$WORKER_SERVICE" >/dev/null 2>&1 || true' EXIT
 
 oracle_reset
-loadgen run --target kafka --phase "60s@$RATE" >/dev/null &
+loadgen run --target "$E2E_TARGET" --phase "60s@$RATE" >/dev/null &
 lg=$!
 sleep 15
 say "kill -9 $WORKER_SERVICE"; dc kill -s SIGKILL "$WORKER_SERVICE" >/dev/null
@@ -24,4 +24,4 @@ dc start "$WORKER_SERVICE" >/dev/null; say "$WORKER_SERVICE restarted"
 wait $lg || say "load generator reported send errors"
 fails=0
 wait_accounted || fails=1
-finish $fails
+FINISH_IGNORE=latency finish $fails

@@ -9,6 +9,10 @@ CHAOS=$ROOT/harness/chaos
 export ORACLE=${ORACLE:-http://localhost:18080}
 TOXI=${TOXI:-http://localhost:8474}
 WORKER_SERVICE=${WORKER_SERVICE:-delivery-worker}
+# How end-to-end tests send traffic. iggy = producer path (Iggy -> ingest bridge -> Kafka
+# -> worker). The worker only delivers events the bridge admitted, so kafka (straight onto
+# notifications.requested) no longer reaches the adapters; keep it for Kafka-only checks.
+E2E_TARGET=${E2E_TARGET:-iggy}
 DRAIN_TIMEOUT=${DRAIN_TIMEOUT:-180}
 OAUTH=()
 [[ -n "${ORACLE_ADMIN_TOKEN:-}" ]] && OAUTH=(-H "Authorization: Bearer $ORACLE_ADMIN_TOKEN")
@@ -35,6 +39,11 @@ skip() { echo "$TEST: SKIP ($1)"; exit 2; }
 worker_running() { dc ps --status running --services 2>/dev/null | grep -qx "$WORKER_SERVICE"; }
 require_worker() {
   worker_running || skip "needs $WORKER_SERVICE (Lane 2) running in compose; nothing to retry, fail over or dead-letter without it"
+}
+# Everything on the producer -> adapter path, plus the worker.
+require_e2e() {
+  require_worker
+  if [[ $E2E_TARGET == iggy ]]; then require_up iggy ingest-bridge kafka; else require_up kafka; fi
 }
 require_up() { # service...
   local s
@@ -63,7 +72,8 @@ wait_accounted() { # [timeout seconds]
 }
 
 # Print the oracle's table, then the verdict. extra_fails counts test-specific failures.
-# FINISH_IGNORE=latency: show that check but don't grade on it (T7: the SLO is for normal load).
+# FINISH_IGNORE=latency: show that check but don't grade on it. The 2 s p99 SLO is for
+# normal load (T0); fault tests grade on their own criteria (harness/README.md test matrix).
 finish() { # extra_fails
   local extra=${1:-0}
   echo

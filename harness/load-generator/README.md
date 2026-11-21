@@ -11,11 +11,16 @@ This folder holds **two tools**:
 
 | `--target` | Sends to | Needs | Use it for |
 |---|---|---|---|
-| `kafka` (default) | `notifications.requested`, raw Protobuf, key = `account_id` (the format in `contracts/README.md`) | the delivery worker | the real T1–T7 |
-| `adapter` | an adapter's `POST /send`, through Toxiproxy by default (`toxiproxy:21001`) | adapters + oracle | load-testing the adapters today, before the worker exists |
+| `iggy` (default) | Iggy `relayguard/requests`, ProtoJSON, on partition `sha256(account)[:4] % 6`, exactly like the real producers | Iggy, ingest bridge, Kafka, the delivery worker | the real T0–T7 (full producer → phone path) |
+| `kafka` | `notifications.requested`, raw Protobuf, key = `account_id` (the format in `contracts/README.md`) | Kafka | Kafka-only checks. **The worker won't deliver these** (see below) |
+| `adapter` | an adapter's `POST /send`, through Toxiproxy by default (`toxiproxy:21001`) | adapters + oracle | adapter-level tests (T0, T3, T7 with `TARGET=adapter`) |
 | `none` | nowhere, counts only | nothing | dry runs |
 
-**Why Kafka and not Iggy:** writing straight to Kafka tests the delivery path on its own. If a test fails, the bug is in the worker or the adapters, not in ingest. Lane 1 tests the bridge separately.
+**Why Iggy and not Kafka:** the worker only delivers events that already have a row in `ingested_events`, and only the ingest bridge writes that row ("ingest is the admission authority", see `services/delivery-worker-go/README.md`). An event written straight to Kafka fails the `deliveries → ingested_events` foreign key and is never sent. Going through Iggy also means the tests cover ingest, which the Nov 30 demo needs to show.
+
+**The partition has to match.** The bridge recomputes `sha256(account_id)`, first 4 bytes big-endian, mod 6, and rejects a mismatch as `wrong_partition`. That keeps each account on one partition, so its messages stay in order. `wire.iggy_partition` must stay bit-for-bit the same as `tools/demo-producer.py` and the bridge.
+
+**Replays through Iggy are deduped at ingest.** Re-sending an `event_id` the bridge already published is dropped as a duplicate (or rejected as `event_id_conflict` if the timestamps changed), so it never reaches the worker. T3 relies on that. A DLQ replay (T5) uses the worker's operator command instead: `docker compose exec delivery-worker /delivery-worker replay EVENT_ID OPERATOR`.
 
 **What adapter mode is not:** it's a stand-in client, not the worker. It keeps per-account order (one sender per account) and retries with the same `event_id`, but it has no failover, no DLQ and no TTL check. On a 429 it waits `Retry-After` and tries again without using up a retry attempt, because 429 means "slow down", not "broken". The worker should behave the same way.
 
@@ -23,18 +28,18 @@ This folder holds **two tools**:
 - Every run uses its own accounts, `lg-<run-tag>-0001` and up, so sequences start at 1 and never collide with the real producers or an earlier run.
 - `event_id` is a UUIDv4, `sequence` goes up by one per account, `occurredAt` is the send time. OTPs expire after 5 minutes and fraud alerts after 30 minutes.
 - Phone numbers are `+1408555 01xx`, which is reserved for fiction. Only ids and times go to the oracle, never the number or the text.
-- The Kafka bytes come from Python classes **generated from `contracts/proto` at build time**, so a contract change can't silently drift.
+- The Iggy JSON and Kafka bytes come from Python classes **generated from `contracts/proto` at build time**, so a contract change can't silently drift.
 
 ## Commands
 Run inside the compose network:
 ```bash
 alias lg='docker compose --profile harness run --rm -T load-generator'
 
-lg run --target kafka --rate 20 --duration 60                      # 60 s at 20/s
-lg run --target kafka --phase 30s@20 --phase 2m@200 --phase 30s@20  # 10x burst (T7)
+lg run --rate 20 --duration 60                                     # 60 s at 20/s, through Iggy
+lg run --phase 30s@20 --phase 2m@200 --phase 30s@20                # 10x burst (T7)
 lg run --target adapter --phase 30s@50 --reset-oracle               # adapters only, fresh oracle run
 lg run ... --out /runs/x.jsonl                                      # keep the events for a replay
-lg replay --from /runs/x.jsonl --last 1000 --target kafka           # same event_ids again (T3)
+lg replay --from /runs/x.jsonl --last 1000                          # same event_ids again (T3)
 lg plan --count 3 --accounts 1 --out /runs/t4.jsonl                 # pick event_ids before sending (T4/T5)
 lg replay --from /runs/t4.jsonl --fresh-timestamps                  # then send the plan
 ```

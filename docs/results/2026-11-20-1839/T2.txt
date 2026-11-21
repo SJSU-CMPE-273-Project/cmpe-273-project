@@ -1,0 +1,43 @@
+== T2: SIGKILL delivery-worker mid-send
+date: 2026-11-21T02:45:53Z   commit: 9d04215
+params: rate=20/s down=10s
+
+{"event": "run.start", "target": "iggy", "run_tag": "c56dd8", "events": 1200, "seconds": 60.0, "phases": ["60s@20"]}
+[18:46:09] kill -9 delivery-worker
+ Container relayguard-delivery-worker-1  Killing
+ Container relayguard-delivery-worker-1  Killed
+ Container relayguard-temporal-data-init-1  Starting
+ Container relayguard-kafka-1  Waiting
+ Container relayguard-temporal-data-init-1  Started
+ Container relayguard-temporal-data-init-1  Waiting
+ Container relayguard-kafka-1  Healthy
+ Container relayguard-kafka-init-1  Starting
+ Container relayguard-temporal-data-init-1  Exited
+ Container relayguard-kafka-init-1  Started
+ Container relayguard-postgres-1  Waiting
+ Container relayguard-kafka-init-1  Waiting
+ Container relayguard-postgres-1  Healthy
+ Container relayguard-kafka-init-1  Exited
+ Container relayguard-delivery-worker-1  Starting
+ Container relayguard-delivery-worker-1  Started
+[18:46:27] delivery-worker restarted
+[18:47:31] all events accounted for after 35s
+
+RelayGuard oracle report   run 0f6e2bcc   started 2026-11-21T02:45:54Z
+
+CHECK                RESULT  DETAIL
+-------------------- ------- --------------------------------------------------
+no loss              PASS    1200 expected: 1200 delivered, 0 missing
+no duplicates        PASS    1200 unique events, 0 delivered more than once
+per-account order    PASS    1200 deliveries across 50 accounts, 0 out of order
+latency              FAIL    p50 33835 ms, p99 69375 ms (target 2000 ms)
+no late delivery     PASS    466 deliveries with a TTL, 0 arrived after expiry
+
+OVERALL: FAIL
+
+provider calls: 1201 total (sms_primary 1201)
+  delivered 1200, idempotent replay 1
+idempotency honoured: True
+ledger: connected (3 expired/dead-lettered)
+
+T2: FAIL

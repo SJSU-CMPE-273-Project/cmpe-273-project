@@ -4,7 +4,7 @@
 
 | Part | Folder | What it does |
 |---|---|---|
-| Load generator | [load-generator/](load-generator/README.md) | **Built.** Two tools. `loadgen` (Python, Lane 3) sends realistic banking traffic (deposits, fraud alerts, OTPs) to Kafka (the real path) or straight to an adapter, in phases such as `30s@20 2m@200`. Replays the same `event_id`s for T3. `main.go` (Go, Lane 1) measures ingest throughput through Iggy and the bridge. |
+| Load generator | [load-generator/](load-generator/README.md) | **Built.** Two tools. `loadgen` (Python, Lane 3) sends realistic banking traffic (deposits, fraud alerts, OTPs) through Iggy and the ingest bridge (the real producer path), to Kafka, or straight to an adapter, in phases such as `30s@20 2m@200`. Replays the same `event_id`s for T3. `main.go` (Go, Lane 1) measures ingest throughput through Iggy and the bridge. |
 | Chaos injector | `chaos/` | **Built.** One script per test (`t0_baseline.sh` … `t8_slow_provider.sh`) plus `run_all.sh`. They break things through Toxiproxy's API (`localhost:8474`), adapter fault modes, oracle rules and `docker compose kill/stop`. |
 | Oracle (fake phone) | `oracle/` | **Built.** Acts as the SMS/push/email "provider", records every message and checks the invariants. See `oracle/README.md`. |
 

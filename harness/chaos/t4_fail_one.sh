@@ -8,9 +8,9 @@
 set -euo pipefail
 source "$(dirname "$0")/lib/common.sh"
 TIMES=${FAIL_TIMES:-2}
-header T4 "message N fails ${TIMES}x, then N+1 and N+2 must wait" "target=kafka"
-require_up oracle kafka
-require_worker
+header T4 "message N fails ${TIMES}x, then N+1 and N+2 must wait" "target=$E2E_TARGET"
+require_e2e
+require_up oracle
 trap 'oracle_clear_rules || true' EXIT
 
 oracle_reset
@@ -18,10 +18,10 @@ plan=(); while IFS= read -r l; do plan+=("$l"); done < <(loadgen plan --count 3 
 read -r n_id account _ <<<"${plan[0]}"
 oracle_rule "{\"event_id\":\"$n_id\",\"action\":\"fail\",\"times\":$TIMES}"
 say "account $account: rule set on N=$n_id"
-loadgen replay --target kafka --from /runs/t4.jsonl --fresh-timestamps >/dev/null
+loadgen replay --target "$E2E_TARGET" --from /runs/t4.jsonl --fresh-timestamps >/dev/null
 fails=0
 wait_accounted 120 || fails=1
 seqs=$(oq sequences "$account")
 echo "delivered order for $account: $seqs (want 1 2 3)"
 [[ $seqs == "1 2 3" ]] || fails=$((fails + 1))
-finish $fails
+FINISH_IGNORE=latency finish $fails

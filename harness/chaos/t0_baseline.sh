@@ -3,16 +3,16 @@
 # p99 latency is under the oracle's target (SLO draft: p99 <= 2 s).
 # Every other test is compared with this one.
 #
-# TARGET=kafka (default) needs the worker. TARGET=adapter measures adapter + Toxiproxy
+# TARGET=iggy (default) is the full producer path and needs the worker. TARGET=adapter measures adapter + Toxiproxy
 # + oracle only, which is useful today and as a floor for the end-to-end number.
 #
-# env: TARGET=kafka RATE=20 SECONDS_=60
+# env: TARGET=iggy|adapter RATE=20 SECONDS_=60
 set -euo pipefail
 source "$(dirname "$0")/lib/common.sh"
-TARGET=${TARGET:-kafka}; RATE=${RATE:-20}; DUR=${SECONDS_:-60}
+TARGET=${TARGET:-$E2E_TARGET}; RATE=${RATE:-20}; DUR=${SECONDS_:-60}
 header T0 "baseline, no faults" "target=$TARGET rate=${RATE}/s duration=${DUR}s"
 require_up oracle toxiproxy sms-adapter-primary
-[[ $TARGET == kafka ]] && require_worker
+[[ $TARGET != adapter ]] && require_e2e
 
 oracle_reset
 LG=$(mktemp)

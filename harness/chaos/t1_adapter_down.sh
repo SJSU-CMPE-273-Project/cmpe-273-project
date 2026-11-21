@@ -9,14 +9,14 @@
 set -euo pipefail
 source "$(dirname "$0")/lib/common.sh"
 OUTAGE=${OUTAGE_SECONDS:-300}; RATE=${RATE:-5}
-header T1 "SMS primary adapter down ${OUTAGE}s" "rate=${RATE}/s target=kafka"
-require_up oracle kafka sms-adapter-primary
-require_worker
+header T1 "SMS primary adapter down ${OUTAGE}s" "rate=${RATE}/s target=$E2E_TARGET"
+require_e2e
+require_up oracle sms-adapter-primary
 trap 'dc start sms-adapter-primary >/dev/null 2>&1 || true' EXIT
 
 oracle_reset
 LG=$(mktemp)
-loadgen run --target kafka --phase "$((OUTAGE + 60))s@$RATE" >"$LG" &
+loadgen run --target "$E2E_TARGET" --phase "$((OUTAGE + 60))s@$RATE" >"$LG" &
 lg=$!
 sleep 20
 say "stopping sms-adapter-primary"; dc stop sms-adapter-primary >/dev/null
@@ -26,5 +26,7 @@ wait $lg || say "load generator reported send errors"
 fails=0
 wait_accounted || fails=1
 last=$(oq last-delivery)
-python3 -c "from datetime import datetime as d;a=d.fromisoformat('$restarted');b=d.fromisoformat('$last');print(f'drain time after restart: {max(0,(b-a).total_seconds()):.1f}s')"
-finish $fails
+drain=$(python3 -c "from datetime import datetime as d;a=d.fromisoformat('$restarted');b=d.fromisoformat('$last');print(f'{max(0,(b-a).total_seconds()):.1f}')")
+echo "drain time after restart: ${drain}s (SLO <= ${DRAIN_SLO:=120}s)"
+python3 -c "import sys; sys.exit(0 if $drain <= $DRAIN_SLO else 1)" || fails=$((fails + 1))
+FINISH_IGNORE=latency finish $fails

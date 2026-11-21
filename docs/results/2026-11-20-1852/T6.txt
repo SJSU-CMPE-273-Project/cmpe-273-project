@@ -1,0 +1,30 @@
+== T6: primary SMS provider outage 45s
+date: 2026-11-21T03:00:36Z   commit: 9d04215
+params: rate=10/s target=iggy
+
+{"event": "run.start", "target": "iggy", "run_tag": "eb88ab", "events": 900, "seconds": 90.0, "phases": ["90s@10"]}
+[19:00:52] sms_primary cut
+[19:01:37] sms_primary restored
+[19:02:10] all events accounted for after 0s
+failover time: 0.39s (outage start -> first fallback delivery)
+p99 during outage run: 1521ms (SLO <= 30000ms)
+
+RelayGuard oracle report   run a163cff3   started 2026-11-21T03:00:37Z
+
+CHECK                RESULT  DETAIL
+-------------------- ------- --------------------------------------------------
+no loss              PASS    900 expected: 900 delivered, 0 missing
+no duplicates        FAIL    900 unique events, 1 delivered more than once
+per-account order    PASS    900 deliveries across 50 accounts, 0 out of order
+latency              PASS    p50 227 ms, p99 1521 ms (target 2000 ms)
+no late delivery     PASS    342 deliveries with a TTL, 0 arrived after expiry
+
+OVERALL: FAIL
+
+provider calls: 901 total (sms_primary 299, sms_secondary 602)
+  delivered 901
+idempotency honoured: True
+ledger: connected (6 expired/dead-lettered)
+
+graded on every check except: latency (reported above, not graded)
+T6: FAIL

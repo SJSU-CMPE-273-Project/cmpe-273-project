@@ -222,6 +222,7 @@ services:
       ORACLE_ADMIN_TOKEN: ${ORACLE_ADMIN_TOKEN:-}
       ADAPTER_URL: http://toxiproxy:21001
       KAFKA_BOOTSTRAP: kafka:9092
+      IGGY_CONNECTION_STRING: iggy://${IGGY_ROOT_USERNAME:-iggy}:${IGGY_ROOT_PASSWORD:-Secret123}@iggy:8090
     volumes:
       - loadgen-runs:/runs     # event files kept between runs for replay (T3/T4/T5)
     read_only: true
