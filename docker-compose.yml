@@ -240,6 +240,24 @@ services:
       - "4317:4317"
       - "4318:4318"
 
+  # ---------------------------------------------------- Ops Console (Lane 4)
+  # Public demo surface: read-only data plus approved replay/guardrail actions.
+  ops-console:
+    build:
+      context: ./services/ops-console-react
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-relayguard}:${POSTGRES_PASSWORD:-relayguard}@postgres:5432/${POSTGRES_DB:-relayguard}
+      OPERATOR_TOKEN: ${OPERATOR_TOKEN:-}
+      REPLAY_DAILY_CAP: ${REPLAY_DAILY_CAP:-20}
+      AGENT_PROMPT_VERSION: ${AGENT_PROMPT_VERSION:-dlq-v1}
+    ports:
+      - "18083:3000"
+    read_only: true
+    tmpfs: [/tmp]
+
 volumes:
   pgdata:
   iggydata:
