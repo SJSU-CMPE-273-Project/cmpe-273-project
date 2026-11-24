@@ -75,6 +75,9 @@ func (a *Adapters) Send(ctx context.Context, attempt Attempt) (result Result, se
 	if err != nil {
 		return Result{}, errors.New("build_request")
 	}
+	// A transparent retry could hide a lost response behind a later dial error.
+	// Let the workflow decide whether and where to retry this send.
+	req.GetBody = nil
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", e.EventId)
 	req.Header.Set("traceparent", e.Traceparent)

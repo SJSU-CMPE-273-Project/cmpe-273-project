@@ -24,8 +24,9 @@ func StartReplay(ctx context.Context, c ReplayStarter, id, operator string) erro
 	id = parsed.String()
 	_, err = c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID: "delivery-replay/" + id, TaskQueue: TaskQueue,
-		WorkflowIDReusePolicy:    enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE,
-		WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_FAIL,
+		WorkflowIDReusePolicy:                    enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE,
+		WorkflowIDConflictPolicy:                 enumspb.WORKFLOW_ID_CONFLICT_POLICY_FAIL,
+		WorkflowExecutionErrorWhenAlreadyStarted: true,
 	}, ReplayWorkflow, id, strings.TrimSpace(operator))
 	return err
 }

@@ -28,6 +28,7 @@ func TestReplaySubmissionRejectsDuplicateRuns(t *testing.T) {
 	require.Equal(t, TaskQueue, s.options.TaskQueue)
 	require.Equal(t, enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE, s.options.WorkflowIDReusePolicy)
 	require.Equal(t, enumspb.WORKFLOW_ID_CONFLICT_POLICY_FAIL, s.options.WorkflowIDConflictPolicy)
+	require.True(t, s.options.WorkflowExecutionErrorWhenAlreadyStarted)
 	require.Equal(t, []interface{}{"18b8faf5-6706-4671-8a83-95a5aa2a010a", "operator"}, s.args)
 	require.Error(t, StartReplay(t.Context(), s, "invalid", "operator"))
 	require.Error(t, StartReplay(t.Context(), s, "18b8faf5-6706-4671-8a83-95a5aa2a010a", " "))
