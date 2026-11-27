@@ -1,0 +1,26 @@
+== T0: baseline, no faults
+date: 2026-11-26T01:01:04Z   commit: f548e16
+params: target=iggy rate=20/s duration=60s
+
+{"event": "run.start", "target": "iggy", "run_tag": "570356", "events": 1200, "seconds": 60.0, "phases": ["60s@20"]}
+[17:02:18] all events accounted for after 6s
+load generator: 1200 events at 20.0/s, sink {"target": "iggy", "stream": "relayguard", "topic": "requests", "peak_backlog": 6, "acked": 1200, "batches": 1197, "produced": 1200}
+
+RelayGuard oracle report   run 8d23eebd   started 2026-11-26T01:01:06Z
+
+CHECK                RESULT  DETAIL
+-------------------- ------- --------------------------------------------------
+no loss              PASS    1200 expected: 1200 delivered, 0 missing
+no duplicates        PASS    1200 unique events, 0 delivered more than once
+per-account order    PASS    1200 deliveries across 50 accounts, 0 out of order
+latency              FAIL    p50 4473 ms, p99 10646 ms (target 2000 ms)
+no late delivery     PASS    484 deliveries with a TTL, 0 arrived after expiry
+
+OVERALL: FAIL
+
+provider calls: 1200 total (sms_primary 1200)
+  delivered 1200
+idempotency honoured: True
+ledger: connected (9 expired/dead-lettered)
+
+T0: FAIL

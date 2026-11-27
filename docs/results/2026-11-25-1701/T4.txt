@@ -1,0 +1,27 @@
+== T4: message N fails 2x, then N+1 and N+2 must wait
+date: 2026-11-26T01:11:52Z   commit: f548e16
+params: target=iggy
+
+[17:11:56] account lg-t428967-0001: rule set on N=7b9d3858-dc48-4849-9b80-fbc58345b729
+[17:12:11] all events accounted for after 7s
+delivered order for lg-t428967-0001: 1 2 3 (want 1 2 3)
+
+RelayGuard oracle report   run aef6bf4f   started 2026-11-26T01:11:53Z
+
+CHECK                RESULT  DETAIL
+-------------------- ------- --------------------------------------------------
+no loss              PASS    3 expected: 3 delivered, 0 missing
+no duplicates        PASS    3 unique events, 0 delivered more than once
+per-account order    PASS    3 deliveries across 1 accounts, 0 out of order
+latency              FAIL    p50 7210 ms, p99 7352 ms (target 2000 ms)
+no late delivery     SKIP    no delivered events with expires_at
+
+OVERALL: FAIL
+
+provider calls: 5 total (sms_primary 5)
+  delivered 3, failed by rule 2
+idempotency honoured: True
+ledger: connected (10 expired/dead-lettered)
+
+graded on every check except: latency (reported above, not graded)
+T4: PASS

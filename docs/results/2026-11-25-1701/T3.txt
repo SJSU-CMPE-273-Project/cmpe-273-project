@@ -1,0 +1,28 @@
+== T3: replay last 1000 events, end to end (worker dedup)
+date: 2026-11-26T01:10:22Z   commit: f548e16
+params: target=iggy rate=100/s
+
+[17:10:23] sending 1000 events
+{"event": "run.start", "target": "iggy", "run_tag": "d7d409", "events": 1000, "seconds": 10.0, "phases": ["10s@100"]}
+[17:11:13] all events accounted for after 37s
+[17:11:13] replaying the last 1000, same event_ids
+provider calls: {"delivered": 1000}
+
+RelayGuard oracle report   run e60ba11d   started 2026-11-26T01:10:23Z
+
+CHECK                RESULT  DETAIL
+-------------------- ------- --------------------------------------------------
+no loss              PASS    1000 expected: 1000 delivered, 0 missing
+no duplicates        PASS    1000 unique events, 0 delivered more than once
+per-account order    PASS    1000 deliveries across 50 accounts, 0 out of order
+latency              FAIL    p50 21494 ms, p99 36712 ms (target 2000 ms)
+no late delivery     PASS    391 deliveries with a TTL, 0 arrived after expiry
+
+OVERALL: FAIL
+
+provider calls: 1000 total (sms_primary 1000)
+  delivered 1000
+idempotency honoured: True
+ledger: connected (10 expired/dead-lettered)
+
+T3: FAIL
