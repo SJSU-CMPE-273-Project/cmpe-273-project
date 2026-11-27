@@ -79,3 +79,21 @@ func TestBatchHandoffFailureSkipsCommit(t *testing.T) {
 	})
 	require.ErrorIs(t, err, failure)
 }
+
+func TestBatchRetriesOnlyFailedRecordBeforeAdvancing(t *testing.T) {
+	var offsets []int64
+	commits := 0
+	err := handoffBatch(t.Context(), []*kgo.Record{{}, {Offset: 1}, {Offset: 2}}, func(_ context.Context, r *kgo.Record) error {
+		offsets = append(offsets, r.Offset)
+		if len(offsets) == 2 {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}, func(context.Context, ...*kgo.Record) error {
+		commits++
+		require.Equal(t, []int64{0, 1, 1, 2}, offsets)
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, commits)
+}

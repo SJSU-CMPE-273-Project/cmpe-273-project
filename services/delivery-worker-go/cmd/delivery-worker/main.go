@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -34,7 +35,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx); err != nil && ctx.Err() == nil {
-		slog.Error("delivery worker stopped", "reason", "dependency_or_handoff_failure")
+		slog.Error("delivery worker stopped", "reason", "dependency_or_handoff_failure", "err", err)
 		os.Exit(1)
 	}
 }
@@ -52,9 +53,8 @@ func run(ctx context.Context) error {
 		return delivery.StartReplay(ctx, temporalClient, os.Args[2], os.Args[3])
 	}
 
-	kafka, err := kgo.NewClient(kgo.SeedBrokers(strings.Split(env("KAFKA_BROKERS", "localhost:9094"), ",")...),
-		kgo.ConsumerGroup("delivery-worker"), kgo.ConsumeTopics("notifications.requested"), kgo.DisableAutoCommit(),
-		kgo.BlockRebalanceOnPoll(), kgo.RequiredAcks(kgo.AllISRAcks()), kgo.RecordDeliveryTimeout(10*time.Second))
+	brokers := kgo.SeedBrokers(strings.Split(env("KAFKA_BROKERS", "localhost:9094"), ",")...)
+	kafka, err := kgo.NewClient(brokers, kgo.RequiredAcks(kgo.AllISRAcks()), kgo.RecordDeliveryTimeout(10*time.Second))
 	if err != nil {
 		return err
 	}
@@ -85,14 +85,45 @@ func run(ctx context.Context) error {
 		defer cancel()
 		event, err := decode(record)
 		if err != nil {
-			return publishDLQ(ctx, &pb.DeadLetter{Original: event, Reason: "invalid_kafka_record", DeadLetteredAt: timestamppb.Now()})
+			if err := publishDLQ(ctx, &pb.DeadLetter{Original: event, Reason: "invalid_kafka_record", DeadLetteredAt: timestamppb.Now()}); err != nil {
+				return fmt.Errorf("publish DLQ: %w", err)
+			}
+			return nil
 		}
-		return delivery.Submit(ctx, temporalClient, event)
+		if err := delivery.Submit(ctx, temporalClient, event); err != nil {
+			return fmt.Errorf("signal account workflow: %w", err)
+		}
+		return nil
 	}
+	for ctx.Err() == nil {
+		consumer, err := kgo.NewClient(brokers, kgo.ConsumerGroup("delivery-worker"), kgo.ConsumeTopics("notifications.requested"), kgo.DisableAutoCommit(), kgo.BlockRebalanceOnPoll())
+		if err != nil {
+			return err
+		}
+		err = consume(ctx, consumer, handoff)
+		consumer.Close()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		// Rejoin from committed offsets. Polling the same client here could
+		// skip the failed batch and later commit past it.
+		slog.Warn("restarting Kafka consumer", "err", err)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+	return ctx.Err()
+}
+
+func consume(ctx context.Context, kafka *kgo.Client, handoff func(context.Context, *kgo.Record) error) error {
 	for ctx.Err() == nil {
 		fetches := kafka.PollRecords(ctx, 64)
 		err := fetches.Err()
-		if err == nil {
+		if err != nil {
+			err = fmt.Errorf("poll Kafka: %w", err)
+		} else {
 			err = handoffBatch(ctx, fetches.Records(), handoff, kafka.CommitRecords)
 		}
 		kafka.AllowRebalance()
@@ -123,7 +154,7 @@ func handoffBatch(ctx context.Context, records []*kgo.Record, handoff func(conte
 				if batchCtx.Err() != nil {
 					return
 				}
-				if err := handoff(batchCtx, record); err != nil {
+				if err := retryHandoff(batchCtx, record, handoff); err != nil {
 					cancel(err)
 					return
 				}
@@ -134,7 +165,36 @@ func handoffBatch(ctx context.Context, records []*kgo.Record, handoff func(conte
 	if err := context.Cause(batchCtx); err != nil {
 		return err
 	}
-	return commit(ctx, records...)
+	if err := commit(ctx, records...); err != nil {
+		return fmt.Errorf("commit Kafka batch: %w", err)
+	}
+	return nil
+}
+
+// Retry the current record before advancing this account. Bound retries
+// while rebalances are blocked, then let the consumer rejoin on failure.
+func retryHandoff(ctx context.Context, record *kgo.Record, handoff func(context.Context, *kgo.Record) error) error {
+	for attempt := 1; ; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		err := handoff(ctx, record)
+		if err == nil {
+			return nil
+		}
+		if attempt == 3 {
+			return fmt.Errorf("handoff partition %d offset %d after %d attempts: %w", record.Partition, record.Offset, attempt, err)
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		slog.Warn("retrying Kafka handoff", "partition", record.Partition, "offset", record.Offset, "attempt", attempt, "err", err)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(attempt) * 250 * time.Millisecond):
+		}
+	}
 }
 
 func decode(record *kgo.Record) (*pb.NotificationRequested, error) {
