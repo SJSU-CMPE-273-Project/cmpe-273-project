@@ -4,6 +4,7 @@ package delivery
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"sort"
 	"time"
 
@@ -114,15 +115,19 @@ type Attempt struct {
 	Target Target
 }
 type Result struct {
-	Accepted   bool
-	Invalid    bool
-	Expired    bool
-	Ambiguous  bool
-	Retryable  bool
-	RetryAfter time.Duration
+	Accepted    bool
+	Invalid     bool
+	Expired     bool
+	Ambiguous   bool
+	Retryable   bool
+	CircuitOpen bool
+	RateLimited bool
+	RetryAfter  time.Duration
 }
 
 func deliver(ctx workflow.Context, e *pb.NotificationRequested) error {
+	jitter := workflow.GetVersion(ctx, "delivery-retry-jitter", workflow.DefaultVersion, 1) != workflow.DefaultVersion
+	throttleWithoutPenalty := workflow.GetVersion(ctx, "delivery-rate-limit", workflow.DefaultVersion, 1) != workflow.DefaultVersion
 	// HTTP retries are controlled here so timers, TTL, and failover are durable.
 	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: 20 * time.Second,
@@ -131,6 +136,7 @@ func deliver(ctx workflow.Context, e *pb.NotificationRequested) error {
 	reason := "channels_exhausted"
 	for _, target := range targets(e) {
 		uncertain := false
+		failures := 0
 		for attempt := 1; ; attempt++ {
 			if e.ExpiresAt != nil && !workflow.Now(ctx).Before(e.ExpiresAt.AsTime()) {
 				return nil
@@ -150,14 +156,30 @@ func deliver(ctx workflow.Context, e *pb.NotificationRequested) error {
 				return nil
 			}
 			uncertain = uncertain || r.Ambiguous
+			throttled := throttleWithoutPenalty && r.RateLimited
+			if !throttled {
+				failures++
+			}
 			if !uncertain && r.Invalid {
 				reason = "invalid_request"
 				break
 			}
-			if !uncertain && (!r.Retryable || attempt >= 5) {
+			if !uncertain && !throttled && (!r.Retryable || failures >= 5) {
 				break
 			}
-			delay := time.Second << min(attempt-1, 5)
+			// Request ordinals remain unique for activity IDs, while only
+			// failures consume the retry budget or increase backoff.
+			delay := time.Second << min(max(failures-1, 0), 5)
+			if throttled {
+				delay = r.RetryAfter
+			} else if jitter {
+				// Record randomness in history so replay uses the exact same timer.
+				if err := workflow.SideEffect(ctx, func(workflow.Context) interface{} {
+					return delay/2 + time.Duration(rand.Int64N(int64(delay/2)+1))
+				}).Get(&delay); err != nil {
+					return err
+				}
+			}
 			if r.RetryAfter > delay {
 				delay = r.RetryAfter
 			}
