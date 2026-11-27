@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -79,35 +80,61 @@ func run(ctx context.Context) error {
 	}
 	defer w.Stop()
 	slog.Info("delivery worker ready")
-	for ctx.Err() == nil {
-		fetches := kafka.PollRecords(ctx, 1)
-		if fetches.Err() != nil {
-			kafka.AllowRebalance()
-			return fetches.Err()
+	handoff := func(ctx context.Context, record *kgo.Record) error {
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		event, err := decode(record)
+		if err != nil {
+			return publishDLQ(ctx, &pb.DeadLetter{Original: event, Reason: "invalid_kafka_record", DeadLetteredAt: timestamppb.Now()})
 		}
-		for _, record := range fetches.Records() {
-			handoff, cancel := context.WithTimeout(ctx, 15*time.Second)
-			event, err := decode(record)
-			if err != nil {
-				err = publishDLQ(handoff, &pb.DeadLetter{Original: event, Reason: "invalid_kafka_record", DeadLetteredAt: timestamppb.Now()})
-			} else {
-				err = delivery.Submit(handoff, temporalClient, event)
-			}
-			cancel()
-			if err != nil {
-				kafka.AllowRebalance()
-				return err
-			}
-			// Synchronous commit only after durable handoff. Replays reuse account ID
-			// and sequence, so a lost commit acknowledgement cannot send twice.
-			if err := kafka.CommitRecords(ctx, record); err != nil {
-				kafka.AllowRebalance()
-				return err
-			}
+		return delivery.Submit(ctx, temporalClient, event)
+	}
+	for ctx.Err() == nil {
+		fetches := kafka.PollRecords(ctx, 64)
+		err := fetches.Err()
+		if err == nil {
+			err = handoffBatch(ctx, fetches.Records(), handoff, kafka.CommitRecords)
 		}
 		kafka.AllowRebalance()
+		if err != nil {
+			return err
+		}
 	}
 	return ctx.Err()
+}
+
+func handoffBatch(ctx context.Context, records []*kgo.Record, handoff func(context.Context, *kgo.Record) error, commit func(context.Context, ...*kgo.Record) error) error {
+	if len(records) == 0 {
+		return nil
+	}
+	// The Kafka key is the account ID. Preserve its signal order because the
+	// workflow can advance its high-water mark as soon as a signal arrives.
+	byAccount := make(map[string][]*kgo.Record)
+	for _, record := range records {
+		key := string(record.Key)
+		byAccount[key] = append(byAccount[key], record)
+	}
+	batchCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	var wg sync.WaitGroup
+	for _, accountRecords := range byAccount {
+		wg.Go(func() {
+			for _, record := range accountRecords {
+				if batchCtx.Err() != nil {
+					return
+				}
+				if err := handoff(batchCtx, record); err != nil {
+					cancel(err)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	if err := context.Cause(batchCtx); err != nil {
+		return err
+	}
+	return commit(ctx, records...)
 }
 
 func decode(record *kgo.Record) (*pb.NotificationRequested, error) {
