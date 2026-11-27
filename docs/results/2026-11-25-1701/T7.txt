@@ -1,0 +1,32 @@
+== T7: 10x burst for 120s
+date: 2026-11-26T01:14:12Z   commit: f548e16
+params: target=iggy base=20/s peak=200/s
+
+[17:14:13] 30s at 20/s, 120s at 200/s, 30s at 20/s
+{"event": "run.start", "target": "iggy", "run_tag": "9a57b7", "events": 25200, "seconds": 180.0, "phases": ["30s@20", "120s@200", "30s@20"]}
+[17:20:19] still 'FAIL' after 180s
+load generator: achieved 140.0/s overall, max lateness 1.051s
+peak consumer lag (delivery-worker): 5204 messages
+/Users/poojasingh/Desktop/SJSU/cmpe273/finalproject273/harness/chaos/t7_burst.sh: line 43: 52786 Terminated: 15          ( while :; do
+    dc exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:9092 --describe --group "$GROUP" 2> /dev/null | awk '$2=="notifications.requested"{s+=$6} END{print s+0}'; sleep 5;
+done > "$LAG" )
+
+RelayGuard oracle report   run 3d040098   started 2026-11-26T01:14:13Z
+
+CHECK                RESULT  DETAIL
+-------------------- ------- --------------------------------------------------
+no loss              FAIL    25200 expected: 4893 delivered, 16 expired, 20291 missing
+no duplicates        PASS    4893 unique events, 0 delivered more than once
+per-account order    PASS    4893 deliveries across 50 accounts, 0 out of order
+latency              FAIL    p50 129857 ms, p99 299933 ms (target 2000 ms)
+no late delivery     PASS    1949 deliveries with a TTL, 0 arrived after expiry
+
+OVERALL: FAIL
+
+provider calls: 4893 total (sms_primary 4893)
+  delivered 4893
+idempotency honoured: True
+ledger: connected (27 expired/dead-lettered)
+
+graded on every check except: latency (reported above, not graded)
+T7: FAIL

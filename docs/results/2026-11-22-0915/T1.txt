@@ -1,0 +1,33 @@
+== T1: SMS primary adapter down 300s
+date: 2026-11-22T17:15:36Z   commit: 3855d93
+params: rate=5/s target=iggy
+
+{"event": "run.start", "target": "iggy", "run_tag": "6f1e34", "events": 1800, "seconds": 360.0, "phases": ["360s@5"]}
+[09:15:59] stopping sms-adapter-primary
+ Container relayguard-sms-adapter-primary-1  Stopping
+ Container relayguard-sms-adapter-primary-1  Stopped
+ Container relayguard-sms-adapter-primary-1  Starting
+ Container relayguard-sms-adapter-primary-1  Started
+[09:21:00] sms-adapter-primary back
+[09:21:44] all events accounted for after 1s
+drain time after restart: 42.6s (SLO <= 120s)
+
+RelayGuard oracle report   run 39b57b11   started 2026-11-22T17:15:39Z
+
+CHECK                RESULT  DETAIL
+-------------------- ------- --------------------------------------------------
+no loss              PASS    1800 expected: 1799 delivered, 1 expired, 0 missing
+no duplicates        PASS    1799 unique events, 0 delivered more than once
+per-account order    PASS    1799 deliveries across 50 accounts, 0 out of order
+latency              FAIL    p50 187 ms, p99 270170 ms (target 2000 ms)
+no late delivery     PASS    733 deliveries with a TTL, 0 arrived after expiry
+
+OVERALL: FAIL
+
+provider calls: 1799 total (sms_primary 267, sms_secondary 1532)
+  delivered 1799
+idempotency honoured: True
+ledger: connected (7 expired/dead-lettered)
+
+graded on every check except: latency (reported above, not graded)
+T1: PASS

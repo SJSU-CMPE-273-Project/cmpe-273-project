@@ -1,0 +1,31 @@
+== T5: poison message -> DLQ -> replay once
+date: 2026-11-26T01:12:11Z   commit: f548e16
+params: target=iggy
+
+[17:12:16] account lg-t523283-0001: poison = 3rd event 3fbd5641-13ba-4921-8919-b4eb15dfa4a2
+[17:12:26] all events accounted for after 4s
+before replay: poison delivered 0x (want 0); account order: 1 2 4 5
+[17:12:26] provider fixed; replaying the poison from the DLQ
+2026/11/26 01:12:27 INFO  No logger configured for temporal client. Created default one.
+after replay: poison delivered 1x (want 1)
+second replay refused (want refused)
+
+RelayGuard oracle report   run f12f366f   started 2026-11-26T01:12:13Z
+
+CHECK                RESULT  DETAIL
+-------------------- ------- --------------------------------------------------
+no loss              PASS    5 expected: 5 delivered, 0 missing
+no duplicates        PASS    5 unique events, 0 delivered more than once
+per-account order    PASS    4 deliveries across 1 accounts, 0 out of order
+latency              FAIL    p50 3605 ms, p99 5834 ms (target 2000 ms)
+no late delivery     PASS    2 deliveries with a TTL, 0 arrived after expiry
+
+OVERALL: FAIL
+
+provider calls: 8 total (push 1, sms_primary 6, sms_secondary 1)
+  delivered 5, rejected by rule 3
+idempotency honoured: True
+ledger: connected (11 expired/dead-lettered)
+
+graded on every check except: latency (reported above, not graded)
+T5: PASS
