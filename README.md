@@ -437,10 +437,12 @@ approval. Caching and batching are future optimizations.
 
 ### Deployment
 
-- **Local development:** Docker Compose, the full stack on one machine
-- **Live demo:** a single-node deployment on [AWS / chosen host], publicly accessible
-- **Public surface:** only the Ops Console (and the demo trigger) has a public URL; all other services are internal
-- **Cost:** free or low-cost tier where possible
+- **Primary live demo:** one Ubuntu droplet running k3s; expose only the Ops Console through Traefik and Let's Encrypt HTTPS.
+- **Fallback:** Docker Compose with Caddy on the droplet; Caddy is the only service bound publicly on ports 80/443.
+- **Public console:** no login for the class demo; `PUBLIC_DEMO=true` disables replay, producer-control, and agent-write endpoints. Three bounded buttons refresh the view, run a fixed three-event smoke test, and open the Oracle report.
+- **Worker load sharing:** deploy three delivery-worker replicas in the same Kafka consumer group. Kafka partitions are assigned across group members; the topic needs at least three partitions to keep all three busy.
+- **Deployment steps and current Lane 2 image prerequisite:** see [the k3s deployment runbook](deploy/k3s/README.md).
+- **Cost:** use a low-cost droplet; shut it down after the demo.
 
 ### Course Module Mapping (additions)
 

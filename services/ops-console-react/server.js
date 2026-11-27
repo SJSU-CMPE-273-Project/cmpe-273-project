@@ -21,6 +21,9 @@ const pool = new Pool({
 const operatorToken = process.env.OPERATOR_TOKEN || '';
 const replayDailyCap = Number.parseInt(process.env.REPLAY_DAILY_CAP || '20', 10);
 const promptVersion = agentConfig.version;
+const publicDemo = /^(1|true|yes)$/i.test(process.env.PUBLIC_DEMO || 'false');
+const oracleUrl = (process.env.ORACLE_URL || '').replace(/\/$/, '');
+const demoTriggerUrl = (process.env.DEMO_TRIGGER_URL || '').replace(/\/$/, '');
 
 function operatorName(req) {
   return String(req.headers['x-relayguard-operator'] || 'anonymous').slice(0, 100);
@@ -40,7 +43,47 @@ function authorized(req, res, next) {
   next();
 }
 
+function mutationsDisabledInPublicDemo(_req, res, next) {
+  if (publicDemo) return res.status(403).json({ error: 'operator actions are disabled in public demo mode' });
+  next();
+}
+
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
+app.get('/api/config', (_req, res) => res.json({ publicDemo }));
+
+app.get('/api/results', authorized, async (_req, res) => {
+  if (!oracleUrl) return res.status(503).type('text').send('Oracle results are not configured.');
+  try {
+    const response = await fetch(`${oracleUrl}/report?format=text`, { signal: AbortSignal.timeout(5000) });
+    const report = await response.text();
+    res.status(response.status).type('text').send(report);
+  } catch {
+    res.status(502).type('text').send('Oracle results are temporarily unavailable.');
+  }
+});
+
+app.get('/api/demo/status', authorized, async (_req, res) => {
+  if (!demoTriggerUrl) return res.status(503).json({ error: 'demo trigger is not configured' });
+  try {
+    const response = await fetch(`${demoTriggerUrl}/status`, { signal: AbortSignal.timeout(3000) });
+    res.status(response.status).json(await response.json());
+  } catch {
+    res.status(502).json({ error: 'demo trigger is temporarily unavailable' });
+  }
+});
+
+app.post('/api/demo/run', authorized, async (_req, res) => {
+  if (!demoTriggerUrl) return res.status(503).json({ error: 'demo trigger is not configured' });
+  try {
+    const response = await fetch(`${demoTriggerUrl}/run`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(5000),
+    });
+    res.status(response.status).json(await response.json());
+  } catch {
+    res.status(502).json({ error: 'demo trigger is temporarily unavailable' });
+  }
+});
 
 app.get('/api/deliveries', authorized, async (req, res, next) => {
   try {
@@ -95,7 +138,7 @@ app.get('/api/dlq', authorized, async (_req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.post('/api/dlq/:eventId/replay', authorized, async (req, res, next) => {
+app.post('/api/dlq/:eventId/replay', mutationsDisabledInPublicDemo, authorized, async (req, res, next) => {
   const operator = operatorName(req);
   const eventId = req.params.eventId;
   const client = await pool.connect();
@@ -157,7 +200,7 @@ app.get('/api/controls', authorized, async (_req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.put('/api/controls/producers/:producer', authorized, async (req, res, next) => {
+app.put('/api/controls/producers/:producer', mutationsDisabledInPublicDemo, authorized, async (req, res, next) => {
   const operator = operatorName(req);
   const producer = req.params.producer;
   const enabled = typeof req.body.enabled === 'boolean' ? req.body.enabled : null;
@@ -175,7 +218,7 @@ app.put('/api/controls/producers/:producer', authorized, async (req, res, next) 
   } catch (error) { next(error); }
 });
 
-app.put('/api/controls/guardrails/:key', authorized, async (req, res, next) => {
+app.put('/api/controls/guardrails/:key', mutationsDisabledInPublicDemo, authorized, async (req, res, next) => {
   const operator = operatorName(req);
   const key = req.params.key;
   const value = String(req.body.value ?? '').trim();
@@ -229,7 +272,7 @@ app.get('/api/agent/usage', authorized, async (_req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.post('/api/agent/evaluate/:eventId', authorized, async (req, res, next) => {
+app.post('/api/agent/evaluate/:eventId', mutationsDisabledInPublicDemo, authorized, async (req, res, next) => {
   const eventId = req.params.eventId;
   try {
     const dlq = await pool.query(`
@@ -254,7 +297,7 @@ app.post('/api/agent/evaluate/:eventId', authorized, async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.post('/api/agent/proposals/:id/approve', authorized, async (req, res, next) => {
+app.post('/api/agent/proposals/:id/approve', mutationsDisabledInPublicDemo, authorized, async (req, res, next) => {
   const operator = operatorName(req);
   const id = Number(req.params.id);
   try {

@@ -28,6 +28,7 @@ CMD ["python", "-m", "pytest", "-q"]
 # ---- runtime ------------------------------------------------------------------
 FROM base
 COPY loadgen ./loadgen
+COPY demo_trigger.py ./demo_trigger.py
 # /runs holds event files for replay (T3/T4/T5). Owned by the app user so a
 # named volume mounted there starts out writable.
 RUN useradd --system --uid 10001 app && mkdir /runs && chown app /runs

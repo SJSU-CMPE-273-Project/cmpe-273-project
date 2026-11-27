@@ -66,5 +66,10 @@ Add a block like this to `docker-compose.yml` and open a PR:
 - **Other port already in use:** something else is on 3000/8233. Stop it, or change the left side of the port mapping.
 - **Schema changes not applied:** init SQL only runs on an empty volume, so run `make reset`.
 
-## AWS (Dec 7 demo)
-Same containers, with Postgres moved to **RDS**. Plan to cover at the Nov 23 milestone.
+## Public droplet demo
+
+Primary deployment is a single Ubuntu droplet with k3s; expose only the Ops Console
+through Traefik and HTTPS. The fallback is Docker Compose with Caddy. See the
+[droplet deployment runbook](../deploy/k3s/README.md) for image publishing, DNS,
+TLS, firewall and worker replica demonstration steps. The worker image is a Lane 2
+prerequisite and is not yet present in this checkout.

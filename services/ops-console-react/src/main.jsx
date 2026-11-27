@@ -28,14 +28,17 @@ function App() {
   const [usage, setUsage] = useState({});
   const [account, setAccount] = useState('');
   const [notice, setNotice] = useState('');
+  const [publicDemo, setPublicDemo] = useState(false);
+  const [demoStatus, setDemoStatus] = useState({ active: false, cooldown_seconds: 0 });
 
   async function refresh() {
     try {
-      const [m, d, t, c, p, u] = await Promise.all([
+      const [m, d, t, c, p, u, config, demo] = await Promise.all([
         api('/api/metrics'), api('/api/dlq'), api('/api/deliveries'),
-        api('/api/controls'), api('/api/agent/proposals'), api('/api/agent/usage'),
+        api('/api/controls'), api('/api/agent/proposals'), api('/api/agent/usage'), api('/api/config'), api('/api/demo/status').catch(error => ({ active: false, cooldown_seconds: 0, error: error.message })),
       ]);
       setMetrics(m); setDlq(d.items); setDeliveries(t.items); setControls(c); setProposals(p.items); setUsage(u);
+      setPublicDemo(config.publicDemo); setDemoStatus(demo);
     } catch (error) { setNotice(error.message); }
   }
 
@@ -68,6 +71,14 @@ function App() {
     catch (error) { setNotice(error.message); }
   }
 
+  async function runDemo() {
+    try {
+      const result = await api('/api/demo/run', { method: 'POST' });
+      setNotice(`Safe ${result.scope} smoke test ${result.status}; up to ${result.max_events} synthetic events.`);
+      await refresh();
+    } catch (error) { setNotice(error.message); }
+  }
+
   return <main>
     <header className="topbar">
       <div><span className="brandmark">RG</span><div><b>RelayGuard</b><span>Operations console</span></div></div>
@@ -75,6 +86,19 @@ function App() {
     </header>
 
     {notice && <div className="notice"><span>{notice}</span><button onClick={() => setNotice('')}>Dismiss</button></div>}
+
+    {publicDemo && <section className="panel demo-panel">
+      <div className="panel-head"><div><p>Public demo</p><h2>Safe demonstration controls</h2></div><span className="demo-badge">No login · bounded actions</span></div>
+      <div className="demo-actions">
+        <button className="ghost" onClick={refresh}>Refresh live view</button>
+        <button className="primary" disabled={demoStatus.active || demoStatus.cooldown_seconds > 0} onClick={runDemo}>
+          {demoStatus.active ? 'Smoke test running…' : demoStatus.cooldown_seconds > 0 ? `Available in ${demoStatus.cooldown_seconds}s` : 'Run safe smoke test'}
+        </button>
+        <button className="ghost" onClick={() => window.open('/api/results', '_blank', 'noopener')}>View Oracle results</button>
+      </div>
+      {demoStatus.last_result && <p className="demo-result">Last smoke run: {demoStatus.last_error || JSON.stringify(demoStatus.last_result)}</p>}
+      <p className="demo-note">The smoke test is fixed at 3 synthetic events, one per second. Target: {demoStatus.target || 'adapter'}{demoStatus.target === 'adapter' ? ' (does not exercise the worker)' : ' (Iggy ingest path; requires the worker)'}. Cooldown: 30 seconds.</p>
+    </section>}
 
     <section className="metrics">
       <Metric label="Delivered" value={metrics.delivered ?? '—'} tone="green" />
@@ -91,25 +115,34 @@ function App() {
           <table><thead><tr><th>Event</th><th>Reason</th><th>Attempts</th><th>Age</th><th></th></tr></thead>
             <tbody>{dlq.map(item => <tr key={item.event_id}>
               <td><code>{item.event_id.slice(0, 8)}</code><small>{item.account_id} · seq {item.sequence}</small></td>
-              <td>{item.reason}</td><td>{item.attempts}</td>
+              <td>{item.reason}</td><td>
+                <details className="attempt-details">
+                  <summary>{item.attempts.length} attempt{item.attempts.length === 1 ? '' : 's'}</summary>
+                  {item.attempts.map(attempt => <div className="attempt-entry" key={attempt.attempt}>
+                    <b>#{attempt.attempt} · {attempt.channel} / {attempt.provider}</b>
+                    <span>{attempt.succeeded ? 'Succeeded' : 'Failed'}{attempt.latency_ms != null ? ` · ${attempt.latency_ms} ms` : ''}</span>
+                    {attempt.error && <span>{attempt.error}</span>}
+                  </div>)}
+                </details>
+              </td>
               <td>{item.dead_lettered_at ? new Date(item.dead_lettered_at).toLocaleTimeString() : '—'}</td>
-              <td className="actions">
+              {!publicDemo && <td className="actions">
                 <button className="ghost" onClick={() => evaluate(item.event_id)}>Ask agent</button>
                 <button className="primary" disabled={!!item.replayed_at} onClick={() => replay(item.event_id)}>{item.replayed_at ? 'Replayed' : 'Replay'}</button>
-              </td>
+              </td>}
             </tr>)}</tbody>
           </table>
           {!dlq.length && <div className="empty">No dead-lettered messages</div>}
         </div>
       </article>
 
-      <aside className="panel controls-panel">
+      {!publicDemo && <aside className="panel controls-panel">
         <div className="panel-head"><div><p>Guardrails</p><h2>Producer controls</h2></div></div>
         {controls.producers.map(p => <div className="producer" key={p.producer}>
           <div><b>{p.producer}</b><span>{p.max_per_minute} / minute</span></div>
           <button className={p.enabled ? 'switch on' : 'switch'} onClick={() => updateProducer(p.producer, { enabled: !p.enabled, max_per_minute: p.max_per_minute })} aria-label="Toggle producer"><i /></button>
         </div>)}
-      </aside>
+      </aside>}
     </section>
 
     <section className="panel timeline-panel">
@@ -122,14 +155,14 @@ function App() {
       </table></div>
     </section>
 
-    <section className="panel proposals-panel">
+    {!publicDemo && <section className="panel proposals-panel">
       <div className="panel-head"><div><p>Human in the loop</p><h2>Agent proposals</h2><span>Today (UTC): {Number(usage.input_tokens || 0) + Number(usage.output_tokens || 0)} tokens · ${Number(usage.cost_usd || 0).toFixed(6)} estimated · budget {usage.budget_tokens || 0}/{usage.daily_budget || 0} (includes reservations)</span></div></div>
       {!proposals.length ? <div className="empty">No proposals</div> : proposals.map(p => <div className="proposal" key={p.id}>
         <div><span className={`action ${p.action}`}>{p.action}</span><code>{p.event_id?.slice(0, 8)}</code><small>Prompt {p.prompt_version} · {p.model} · {p.input_tokens} in / {p.output_tokens} out · {p.source}{p.usage_uncertain ? " · usage unknown; cost upper bound" : ""}</small></div>
         <p>{p.rationale}<small>Risk: {p.risk}</small></p>
         {p.approved == null ? <button className="primary" onClick={() => approve(p.id)}>Approve</button> : <span className="decision">{p.approved ? `Approved by ${p.approved_by}` : 'Rejected'}</span>}
       </div>)}
-    </section>
+    </section>}
   </main>;
 }
 
