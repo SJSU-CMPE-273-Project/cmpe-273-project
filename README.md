@@ -87,8 +87,7 @@ flowchart TB
 
     subgraph L3["③ Event backbone"]
         direction LR
-        K1[("Kafka<br/>notifications.requested")]
-        K2[("Kafka<br/>notifications.status")]
+        K1[("Kafka<br/>notifications.requested<br/>key = account_id")]
         DLQ[("Kafka<br/>notifications.dlq")]
     end
 
@@ -99,6 +98,8 @@ flowchart TB
         TS <--> DW
     end
 
+    TP{{"Toxiproxy<br/>fault injection"}}
+
     subgraph L5["⑤ Channel adapters"]
         direction LR
         SMS1["SMS primary<br/>(Ruby)"]
@@ -106,27 +107,38 @@ flowchart TB
         PUSH["Push / Email<br/>(Node.js)"]
     end
 
+    PR["Provider<br/>(in tests: the oracle, a fake phone)"]
     PH(["📱 Customer"])
 
     L1 --> IG
     BR --> K1
     K1 --> DW
-    DW --> L5
+    DW --> TP
+    TP --> L5
+    L5 --> PR
+    PR --> PH
     DW -. "retries exhausted" .-> DLQ
-    DW --> K2
-    L5 --> PH
 
     subgraph SIDE["Shared platform"]
         direction TB
-        DB[("PostgreSQL · AWS RDS<br/>idempotency keys · audit log")]
-        UI["Ops Console (React)<br/>timeline · DLQ · replay"]
-        OT["OpenTelemetry · Grafana"]
+        DB[("PostgreSQL<br/>dedup keys · delivery ledger · dead letters")]
+        OT["OpenTelemetry → Jaeger (local)<br/>→ IBM Instana (deployed)"]
+        OP["Operator replay CLI<br/>delivery-worker replay"]
+        UI["Ops Console (React)<br/>planned"]
     end
 
     BR --- DB
     DW --- DB
-    UI -. "idempotent replay" .-> K1
+    OP -. "replay once, same event_id" .-> TS
 ```
+
+How to read it:
+
+- **Toxiproxy** sits between the worker and every adapter (`sms_primary`, `sms_secondary`, `push_email`), so failure tests can cut connections or add latency on any channel.
+- In tests the adapters call the **oracle** as their provider. The oracle records every arrival and grades the run (no loss, no duplicates, per-account order, latency).
+- **Dead letters** are written twice: to Postgres (`dead_letters`, with attempt history) and to the `notifications.dlq` topic.
+- **Replay** is an audited operator command. It starts a Temporal workflow named `delivery-replay/<event_id>` that rejects a duplicate, so an event can be replayed only once, and it reuses the original `event_id`.
+- The `notifications.status` topic is created by `infra/kafka/create-topics.sh` but nothing publishes to it yet. The **Ops Console** is planned and not built yet.
 
 ### Delivery workflow (per account)
 
@@ -134,7 +146,9 @@ flowchart TB
 flowchart LR
     A["Next message<br/>in account order"] --> B{"Already sent?<br/>(idempotency key)"}
     B -- yes --> Z["Skip"]
-    B -- no --> C["Send via<br/>primary SMS"]
+    B -- no --> T{"Expired?<br/>(TTL)"}
+    T -- yes --> X["Record expired<br/>never sent late"]
+    T -- no --> C["Send via<br/>primary SMS"]
     C -- ok --> D["Record delivered<br/>→ next message"]
     C -- fail --> E["Backoff + jitter<br/>retry"]
     E -- "circuit open" --> F["Failover:<br/>secondary SMS"]
@@ -211,15 +225,15 @@ Reported metrics: end-to-end latency (p50/p99, event → provider ack), loss rat
 | Ingest streaming | **Apache Iggy** | Lightweight, low-latency persistent streams for high-rate producer ingest |
 | Event backbone | **Apache Kafka** | Durable, partitioned, ordered log shared across services |
 | Durable workflows | **Temporal** | Crash-proof retries, timers, backoff, failover and per-account ordering |
-| Database | **PostgreSQL on AWS RDS** | Idempotency keys, delivery log, DLQ metadata, audit trail |
+| Database | **PostgreSQL** (container locally; StatefulSet with a persistent volume when deployed) | Idempotency keys, delivery log, DLQ metadata, audit trail |
 | Ingest bridge, delivery worker | **Go** | Strong concurrency; official Iggy and Temporal Go SDKs |
 | Core banking producer | **Java (Spring Boot)** | Typical bank core-system language |
 | Fraud engine producer | **Python** | Scoring and data logic |
 | Auth/OTP producer, SMS adapters | **Ruby** | Shows independent team ownership and cross-language contracts |
 | Push/email adapter, Ops Console | **Node.js, TypeScript/React** | Delivery timeline, DLQ view and replay |
 | Contracts | **Protobuf / JSON Schema** | One message contract across all languages |
-| Observability | **OpenTelemetry, Prometheus, Grafana** | Trace one message across every service and language |
-| Deployment | **Docker Compose** (local), **AWS** (demo) | Reproducible dev environment and live demo |
+| Observability | **OpenTelemetry** → **Jaeger** (local), **IBM Instana** (deployed) | Trace one message across every service and language |
+| Deployment | **Docker Compose** (local), **single-node k3s** on a public VM (live demo) | Reproducible dev environment and a public, low-cost live demo |
 | Chaos testing | Custom harness plus **Toxiproxy** | Scripted crashes, partitions, latency and provider outages |
 
 ### Course module mapping
@@ -232,7 +246,7 @@ Reported metrics: end-to-end latency (p50/p99, event → provider ack), loss rat
 | 5 Distributed Transactions | Idempotency keys; Temporal saga for retry → failover → DLQ |
 | 6 Fault Tolerance | Backoff, circuit breakers, failover, DLQ, chaos tests |
 | 8 Event-Driven Systems | The entire pipeline |
-| 9 Cloud-Native | Containerized services deployed on AWS |
+| 9 Cloud-Native | Containerized services on a single-node k3s cluster: stateless Deployments, stateful StatefulSets with persistent volumes |
 | 10 Observability | OpenTelemetry tracing end to end |
 
 ---
@@ -419,7 +433,7 @@ The ops agent is the only part of RelayGuard that uses an LLM, so token cost sca
 ### Deployment
 
 - **Local development:** Docker Compose, the full stack on one machine
-- **Live demo:** a single-node deployment on [AWS / chosen host], publicly accessible
+- **Live demo:** a single-node k3s cluster on a low-cost public VM (planned: a DigitalOcean droplet), reachable by anyone with the link and no login
 - **Public surface:** only the Ops Console (and the demo trigger) has a public URL; all other services are internal
 - **Cost:** free or low-cost tier where possible
 
