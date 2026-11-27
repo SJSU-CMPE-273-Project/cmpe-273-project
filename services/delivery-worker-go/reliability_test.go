@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -66,6 +68,52 @@ func TestAdapterStatusWithoutJSONAndDialFailure(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, r.Retryable)
 	require.False(t, r.Ambiguous)
+}
+
+func TestAdapterLostResponseOnReusedConnection(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer serverConn.Close()
+	var dials atomic.Int32
+	tr := &http.Transport{DialContext: func(context.Context, string, string) (net.Conn, error) {
+		if dials.Add(1) == 1 {
+			return clientConn, nil
+		}
+		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: fmt.Errorf("provider offline")}
+	}}
+	defer tr.CloseIdleConnections()
+	client := &http.Client{Transport: tr, Timeout: 5 * time.Second}
+
+	// Warm the connection, then drop it after reading the complete send.
+	readSend := make(chan error, 1)
+	go func() {
+		defer serverConn.Close()
+		reader := bufio.NewReader(serverConn)
+		if _, err := http.ReadRequest(reader); err != nil {
+			readSend <- err
+			return
+		}
+		if _, err := io.WriteString(serverConn, "HTTP/1.1 204 No Content\r\n\r\n"); err != nil {
+			readSend <- err
+			return
+		}
+		req, err := http.ReadRequest(reader)
+		if err == nil {
+			_, err = io.Copy(io.Discard, req.Body)
+			req.Body.Close()
+		}
+		readSend <- err
+	}()
+	resp, err := client.Get(proxyURLs["sms_primary"])
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	a := &Adapters{Client: client}
+	result, err := a.Send(t.Context(), Attempt{event(1), Target{Provider: "sms_primary"}})
+	require.NoError(t, err)
+	require.NoError(t, <-readSend)
+	require.True(t, result.Ambiguous)
+	require.True(t, result.Retryable)
+	require.EqualValues(t, 1, dials.Load())
 }
 
 // T6 exercises the real adapter and circuit through durable workflow timers.

@@ -94,6 +94,7 @@ func TestAdapterResponses(t *testing.T) {
 func newEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
+	env.RegisterActivityWithOptions(func(context.Context, *pb.NotificationRequested) error { return nil }, activity.RegisterOptions{Name: ExpireActivity})
 	env.RegisterActivityWithOptions(func(context.Context, Attempt) (Result, error) { return Result{}, nil }, activity.RegisterOptions{Name: AttemptActivity})
 	env.RegisterActivityWithOptions(func(context.Context, *pb.NotificationRequested, string) error { return nil }, activity.RegisterOptions{Name: DeadLetterActivity})
 	return env

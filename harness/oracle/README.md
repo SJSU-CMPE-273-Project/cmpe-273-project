@@ -8,9 +8,9 @@ The oracle stands in for every real provider (SMS primary, SMS secondary, push, 
 
 | Check | Passes when | Notes |
 |---|---|---|
-| **no loss** | every expected event is delivered, expired or dead-lettered | Expired/dead-lettered states are read from Postgres `deliveries`. "Delivered" is never taken from the worker; only the oracle's own receipts count. |
+| **no loss** | every expected event is delivered, expired or dead-lettered | Expired/dead-lettered states are read from Postgres `deliveries`; historical `dead_letters` rows remain accounted for after replay. "Delivered" is never taken from the worker; only the oracle's own receipts count. |
 | **no duplicates** | each `event_id` reaches the phone at most once | Across all providers and channels |
-| **per-account order** | for each account, delivered `sequence` never goes backwards | Gaps are fine. Dead-lettered events are exempt, because a replay arrives late by design (T5). |
+| **per-account order** | for each account, delivered `sequence` never goes backwards | Gaps are fine. Events with a historical `dead_letters` row remain exempt after successful replay, which arrives late by design (T5). |
 | **latency** | p99 of `occurred_at` → oracle receipt ≤ `P99_TARGET_MS` | Also reports p50, p95, max |
 | **no late delivery** | nothing arrives after its `expires_at` | OTP TTL guardrail |
 

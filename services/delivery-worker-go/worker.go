@@ -19,6 +19,8 @@ const (
 	SignalName         = "notification"
 	AttemptActivity    = "delivery.attempt"
 	DeadLetterActivity = "delivery.dead-letter"
+	ExpireActivity     = "delivery.expire"
+	LoadReplayActivity = "delivery.load-replay"
 )
 
 // Mailbox survives ContinueAsNew. Sequence is a high-water mark, not a count:
@@ -126,6 +128,7 @@ type Result struct {
 }
 
 func deliver(ctx workflow.Context, e *pb.NotificationRequested) error {
+	persistExpiry := workflow.GetVersion(ctx, "delivery-persist-expiry", workflow.DefaultVersion, 1) != workflow.DefaultVersion
 	jitter := workflow.GetVersion(ctx, "delivery-retry-jitter", workflow.DefaultVersion, 1) != workflow.DefaultVersion
 	throttleWithoutPenalty := workflow.GetVersion(ctx, "delivery-rate-limit", workflow.DefaultVersion, 1) != workflow.DefaultVersion
 	// HTTP retries are controlled here so timers, TTL, and failover are durable.
@@ -139,6 +142,9 @@ func deliver(ctx workflow.Context, e *pb.NotificationRequested) error {
 		failures := 0
 		for attempt := 1; ; attempt++ {
 			if e.ExpiresAt != nil && !workflow.Now(ctx).Before(e.ExpiresAt.AsTime()) {
+				if persistExpiry {
+					return workflow.ExecuteActivity(ctx, ExpireActivity, e).Get(ctx, nil)
+				}
 				return nil
 			}
 			var r Result
@@ -198,4 +204,19 @@ func deliver(ctx workflow.Context, e *pb.NotificationRequested) error {
 		}
 	}
 	return workflow.ExecuteActivity(ctx, DeadLetterActivity, e, reason).Get(ctx, nil)
+}
+
+// ReplayWorkflow bypasses the account high-water mark only for an audited DLQ
+// event. Its stable workflow ID and RejectDuplicate policy allow one operator
+// replay, including concurrent submissions and requests after completion.
+func ReplayWorkflow(ctx workflow.Context, eventID, operator string) error {
+	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		StartToCloseTimeout: 20 * time.Second,
+		RetryPolicy:         &temporal.RetryPolicy{InitialInterval: time.Second, MaximumInterval: 30 * time.Second},
+	})
+	var e *pb.NotificationRequested
+	if err := workflow.ExecuteActivity(ctx, LoadReplayActivity, eventID, operator).Get(ctx, &e); err != nil {
+		return err
+	}
+	return deliver(ctx, e)
 }

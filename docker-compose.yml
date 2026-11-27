@@ -172,6 +172,8 @@ services:
       context: .
       dockerfile: services/delivery-worker-go/Dockerfile
     depends_on:
+      postgres:
+        condition: service_healthy
       temporal:
         condition: service_started
       kafka-init:
@@ -188,6 +190,7 @@ services:
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: relayguard
       KAFKA_BROKERS: kafka:9092
+      DATABASE_URL: postgresql://${POSTGRES_USER:-relayguard}:${POSTGRES_PASSWORD:-relayguard}@postgres:5432/${POSTGRES_DB:-relayguard}
     read_only: true
     restart: unless-stopped
 

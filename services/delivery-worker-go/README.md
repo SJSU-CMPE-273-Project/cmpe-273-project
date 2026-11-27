@@ -36,8 +36,8 @@ and keep Kafka partitioning stable. The workflow sorts buffered signals by
 sequence and ignores duplicate event IDs/sequences. It retains a sequence
 high-water mark across Continue-As-New (every 1,000 processed messages), draining
 signals and carrying the pending queue into the next run. It does not wait for
-contiguous sequences: ingest rejection can leave gaps. A late sequence at or
-below the high-water mark is ignored. Temporal history must be retained; do
+contiguous sequences: ingest rejection can leave gaps. A normal Kafka record at or below the high-water mark is ignored. Operator
+replay uses the separate workflow described below. Temporal history must be retained; do
 not terminate/reset account workflows as an ordinary replay mechanism.
 
 HTTP 504, transport errors after connection, malformed responses, and a retried activity following
@@ -73,10 +73,72 @@ resets on worker restart; multiple worker processes have independent breakers.
 A cluster-wide retry budget and shared durable breaker state remain future work.
 
 Expiry is checked before each attempt in both the workflow and activity, and
-retry timers are bounded by the remaining TTL. An exhausted definitive failure
-publishes a Protobuf `DeadLetter` to `notifications.dlq`, keyed by account ID.
-Publishing can replay after a lost acknowledgement: DLQ readers must deduplicate
-by original event ID.
+retry timers are bounded by the remaining TTL. Both paths persist
+`deliveries.state = expired`. Exhausted definitive failures atomically persist
+`dead_lettered` and the original Protobuf payload in `dead_letters`, then publish
+a Protobuf `DeadLetter` to `notifications.dlq`, keyed by account ID. Its attempts
+come from the complete, ordered Postgres audit history. A publication retry uses
+the stored dead-letter timestamp and reason. DLQ readers must deduplicate by
+original event ID because a lost Kafka acknowledgement may cause republication.
+
+Postgres is required. The worker creates delivery rows only for events already
+present in `ingested_events`; ingest remains the admission authority. Each send
+holds a session advisory lock for its event across the HTTP call. Attempt
+reservations commit before HTTP; interrupted sends remain visible as
+`interrupted_or_pending`. Completed attempts store channel, provider, time,
+latency, success and a PII-free error classification. A delivered ledger row
+skips subsequent sends across all providers. Provider idempotency with the same
+`event_id` protects the gap between provider acceptance and ledger commit.
+
+## DLQ and operator replay (T5)
+
+Apply the migration to an existing Compose database before restarting workers
+(fresh databases apply it automatically):
+
+```sh
+docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < infra/postgres/init/005_delivery_replay.sql
+docker compose up -d --build delivery-worker oracle
+```
+
+After fixing the provider rejection, start an audited replay with:
+
+```sh
+docker compose exec delivery-worker /delivery-worker replay EVENT_UUID OPERATOR_NAME
+```
+
+This starts `delivery-replay/EVENT_UUID` on the delivery task queue; it does not
+wait for completion. Inspect that workflow in Temporal and the delivery ledger
+for the outcome. Repeated/concurrent operator requests are rejected by Temporal's
+workflow ID policies and a durable database claim tied to the replay run. Activity
+retries of the same claim remain safe. Exactly one replay is allowed per event;
+a failed replay returns to DLQ and retains all previous attempts. It cannot be
+claimed again as a new replay run.
+
+Replay loads the stored original payload and preserves `event_id`, account,
+sequence, channels and TTL. It bypasses the account sequence high-water mark;
+it does not change ordinary Kafka deduplication. Expired notifications remain
+expired. Original and replay attempts have one monotonically increasing audit
+ordinal. Old DLQ publication retries cannot overwrite a claimed replay. Replay
+metadata (`replayed_at`, `replayed_by`, `replay_token`) and the original DLQ row
+remain after success. The oracle reads terminal states from `deliveries` and
+uses historical `dead_letters` rows to retain the late-replay ordering exemption.
+
+The stored original and Kafka DLQ payload contain recipient/body data needed
+for replay; attempt history contains only safe error classifications. Restrict
+access to the database, DLQ topic and operator command accordingly.
+
+Run database-backed workflow, retry, concurrency and crash-gap checks using an
+isolated test schema (the database role needs `CREATE SCHEMA`):
+
+```sh
+DELIVERY_TEST_DATABASE_URL=postgresql://... go test -race ./services/delivery-worker-go/...
+ORACLE_TEST_DATABASE_URL=postgresql://... python -m pytest harness/oracle/tests
+```
+
+These tests cover max retries with complete history, permanent poison rejection,
+publication acknowledgement loss, a single replay with the original key,
+concurrent replay claims, duplicate activities, provider acceptance followed by
+ledger completion loss, and expiry before send/during backoff.
 
 ## Run
 
@@ -85,7 +147,8 @@ docker compose up -d --build delivery-worker oracle postgres
 ```
 
 The service uses `TEMPORAL_ADDRESS=temporal:7233`,
-`TEMPORAL_NAMESPACE=relayguard`, and `KAFKA_BROKERS=kafka:9092` in Compose.
+`TEMPORAL_NAMESPACE=relayguard`, `KAFKA_BROKERS=kafka:9092`, and the shared
+`DATABASE_URL` in Compose.
 The Compose service and Kafka consumer group are both named `delivery-worker`,
 matching the chaos scripts; no `WORKER_SERVICE` or `WORKER_GROUP` overrides
 are needed.
@@ -139,17 +202,11 @@ component tests; a live Compose/Toxiproxy T6 run remains a separate acceptance c
 
 ## Remaining delivery milestones
 
-The broader Lane 2 design also requires a Postgres delivery ledger with an
-atomic `deliveries.event_id` claim, delivery/attempt/status records, configured
-guardrail settings, shared retry budgets, and durable reconciliation of uncertain
-sends. Those are not implemented by this worker yet. In particular, uncertain
-sends without an expiry can block that account indefinitely and grow history;
-operator reconciliation and continuation during a long retry are still needed.
-Expiration currently ends workflow processing without writing an `EXPIRED`
-ledger/status record.
-The ingest bridge can publish the same event twice after an acknowledgement/
-ledger crash. Workflow deduplication covers normal Kafka replay and worker
-restarts, including Continue-As-New, but does not replace the durable database
-claim required for reset/reconciliation workflows. Do not claim full T2
-(crash/at-most-once), T4 (ordering), T5 (poison), or T6 (provider outage) chaos
-acceptance until those scenarios run against the complete platform and ledger.
+Remaining work includes published delivery status events, configured guardrail
+settings, shared retry budgets, and durable reconciliation of uncertain sends.
+Uncertain sends without an expiry can still block an account indefinitely and
+grow workflow history; operator reconciliation and continuation during long
+retries remain separate work. Provider idempotency retention is required for
+crash recovery. The database-backed tests use a real Postgres ledger and Temporal's
+workflow test environment; full live Compose/Toxiproxy chaos acceptance is a
+separate check.
