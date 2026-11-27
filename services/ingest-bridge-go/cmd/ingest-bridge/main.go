@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/SJSU-CMPE-273-Project/cmpe-273-project/internal/telemetry"
 	"github.com/apache/iggy/foreign/go/client"
 	"github.com/apache/iggy/foreign/go/client/tcp"
 	iggy "github.com/apache/iggy/foreign/go/contracts"
@@ -29,6 +30,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	// Off unless OTEL_EXPORTER_OTLP_ENDPOINT is set. A tracing problem must
+	// never stop ingest, so a failed setup is logged and the bridge runs on.
+	if shutdown, err := telemetry.Setup(ctx, "ingest-bridge"); err != nil {
+		logger.Warn("tracing disabled", "reason", "setup_failed")
+	} else {
+		defer func() {
+			flush, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = shutdown(flush)
+		}()
+	}
 
 	for ctx.Err() == nil {
 		err := run(ctx, logger)

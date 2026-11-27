@@ -134,6 +134,8 @@ services:
       IGGY_ROOT_USERNAME: ${IGGY_ROOT_USERNAME:-iggy}
       IGGY_ROOT_PASSWORD: ${IGGY_ROOT_PASSWORD:-Secret123}
       KAFKA_BROKERS: kafka:9092
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}  # blank = tracing off; e.g. http://jaeger:4318
+      OTEL_SERVICE_NAME: ingest-bridge
     restart: unless-stopped
 
   # --------------------------------------------------------------- Temporal
@@ -191,6 +193,8 @@ services:
       TEMPORAL_NAMESPACE: relayguard
       KAFKA_BROKERS: kafka:9092
       DATABASE_URL: postgresql://${POSTGRES_USER:-relayguard}:${POSTGRES_PASSWORD:-relayguard}@postgres:5432/${POSTGRES_DB:-relayguard}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}  # blank = tracing off; e.g. http://jaeger:4318
+      OTEL_SERVICE_NAME: delivery-worker
     read_only: true
     restart: unless-stopped
 

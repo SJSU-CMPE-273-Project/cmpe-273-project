@@ -12,8 +12,12 @@ import (
 
 	"github.com/SJSU-CMPE-273-Project/cmpe-273-project/contracts"
 	pb "github.com/SJSU-CMPE-273-Project/cmpe-273-project/gen/go/relayguard/v1"
+	"github.com/SJSU-CMPE-273-Project/cmpe-273-project/internal/telemetry"
 	delivery "github.com/SJSU-CMPE-273-Project/cmpe-273-project/services/delivery-worker-go"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
@@ -49,6 +53,18 @@ func run(ctx context.Context) error {
 			return errors.New("usage: delivery-worker replay EVENT_ID OPERATOR")
 		}
 		return delivery.StartReplay(ctx, temporalClient, os.Args[2], os.Args[3])
+	}
+
+	// Off unless OTEL_EXPORTER_OTLP_ENDPOINT is set. A tracing problem must
+	// never stop delivery, so a failed setup is logged and the worker runs on.
+	if shutdown, err := telemetry.Setup(ctx, "delivery-worker"); err != nil {
+		slog.Warn("tracing disabled", "reason", "setup_failed")
+	} else {
+		defer func() {
+			flush, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = shutdown(flush)
+		}()
 	}
 
 	kafka, err := kgo.NewClient(kgo.SeedBrokers(strings.Split(env("KAFKA_BROKERS", "localhost:9094"), ",")...),
@@ -88,11 +104,17 @@ func run(ctx context.Context) error {
 		for _, record := range fetches.Records() {
 			handoff, cancel := context.WithTimeout(ctx, 15*time.Second)
 			event, err := decode(record)
+			span := startHandoffSpan(&handoff, record, event)
 			if err != nil {
+				span.SetAttributes(attribute.String("relayguard.outcome", "invalid_kafka_record"))
 				err = publishDLQ(handoff, &pb.DeadLetter{Original: event, Reason: "invalid_kafka_record", DeadLetteredAt: timestamppb.Now()})
 			} else {
 				err = delivery.Submit(handoff, temporalClient, event)
 			}
+			if err != nil {
+				span.SetStatus(codes.Error, "handoff_failed")
+			}
+			span.End()
 			cancel()
 			if err != nil {
 				kafka.AllowRebalance()
@@ -108,6 +130,29 @@ func run(ctx context.Context) error {
 		kafka.AllowRebalance()
 	}
 	return ctx.Err()
+}
+
+// startHandoffSpan starts the span for handing one Kafka record to Temporal,
+// continuing the producer's trace from the event's traceparent, and puts it
+// in *ctx. A record that did not decode still gets a span, with no parent.
+func startHandoffSpan(ctx *context.Context, record *kgo.Record, event *pb.NotificationRequested) trace.Span {
+	opts := []trace.SpanStartOption{
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "kafka"),
+			attribute.String("messaging.destination.name", record.Topic),
+			attribute.Int64("messaging.kafka.partition", int64(record.Partition)),
+			attribute.Int64("messaging.kafka.offset", record.Offset),
+		),
+	}
+	parent := *ctx
+	if event != nil {
+		parent = telemetry.FromTraceparent(parent, event.Traceparent)
+		opts = append(opts, trace.WithAttributes(telemetry.EventAttributes(event.EventId, event.AccountId, event.Sequence)...))
+	}
+	var span trace.Span
+	*ctx, span = telemetry.Tracer().Start(parent, "worker.handoff", opts...)
+	return span
 }
 
 func decode(record *kgo.Record) (*pb.NotificationRequested, error) {

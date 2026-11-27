@@ -11,7 +11,11 @@ import (
 
 	contract "github.com/SJSU-CMPE-273-Project/cmpe-273-project/contracts"
 	pb "github.com/SJSU-CMPE-273-Project/cmpe-273-project/gen/go/relayguard/v1"
+	"github.com/SJSU-CMPE-273-Project/cmpe-273-project/internal/telemetry"
 	iggy "github.com/apache/iggy/foreign/go/contracts"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -39,7 +43,7 @@ type bridge struct {
 	checkRejectionTopic func(context.Context) error
 }
 
-func (b bridge) handle(ctx context.Context, pos position, payload []byte) (string, error) {
+func (b bridge) handle(ctx context.Context, pos position, payload []byte) (outcome string, err error) {
 	reason, err := b.store.rejection(ctx, pos)
 	if err != nil {
 		return "", errors.New("read_rejection")
@@ -56,6 +60,20 @@ func (b bridge) handle(ctx context.Context, pos position, payload []byte) (strin
 	if reason != "" {
 		return b.reject(ctx, pos, reason, contract.RejectedEventID(payload))
 	}
+	// One span per valid event, continuing the producer's trace. It records
+	// whether the event was published, absorbed as a duplicate or rejected.
+	ctx, span := telemetry.Tracer().Start(telemetry.FromTraceparent(ctx, event.Traceparent), "bridge.process",
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(telemetry.EventAttributes(event.EventId, event.AccountId, event.Sequence)...),
+		trace.WithAttributes(attribute.Int64("iggy.partition", int64(pos.partition)), attribute.Int64("iggy.offset", int64(pos.offset))))
+	defer func() {
+		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
+		} else {
+			span.SetAttributes(attribute.String("relayguard.outcome", outcome))
+		}
+		span.End()
+	}()
 	key, value, err := contract.KafkaRecord(event)
 	if err != nil {
 		return "", errors.New("encode_kafka")

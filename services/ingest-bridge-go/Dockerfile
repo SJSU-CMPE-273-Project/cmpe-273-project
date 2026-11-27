@@ -4,6 +4,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY contracts ./contracts
 COPY gen/go ./gen/go
+COPY internal ./internal
 COPY services/ingest-bridge-go/cmd/ingest-bridge ./services/ingest-bridge-go/cmd/ingest-bridge
 RUN CGO_ENABLED=0 go build -trimpath -o /ingest-bridge ./services/ingest-bridge-go/cmd/ingest-bridge
 
