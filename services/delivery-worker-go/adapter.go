@@ -54,6 +54,10 @@ func (a *Adapters) Send(ctx context.Context, attempt Attempt) (result Result, se
 	}
 	providerFailed := false
 	defer func() {
+		if result.RateLimited {
+			a.breakers.recordBackPressure(attempt.Target.Provider, generation)
+			return
+		}
 		a.breakers.record(attempt.Target.Provider, generation, providerFailed, time.Now())
 	}()
 	payload := map[string]any{"event_id": e.EventId, "account_id": e.AccountId, "sequence": e.Sequence, "recipient": e.Recipient, "body": e.Body}

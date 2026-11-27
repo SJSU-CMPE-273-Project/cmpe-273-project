@@ -18,7 +18,7 @@
    accepted completes delivery, 400 dead-letters immediately, 422 advances to
    the next target, 429 waits for `Retry-After` without consuming the failure
    budget or increasing backoff, and 503 retries with exponential
-   backoff plus jitter before failover. Each target gets at most five attempts
+   backoff plus jitter before failover. Each target gets at most five failures
    (a circuit opening can cut that short). Requested channel
    order is preserved; SMS expands to primary then secondary.
 
@@ -65,8 +65,9 @@ process. Three consecutive availability failures (503, 504, transport errors,
 or invalid responses) open it for 30 seconds. Open circuits skip new sends to
 the next requested target. After cooldown, exactly one half-open probe is
 allowed: success or a definitive rejection closes the circuit; another failure
-reopens it. 400/422/429 do not count as availability failures. An uncertain send
-waits for cooldown and probes the same provider with its original key; it never
+reopens it. 400/422/429 do not count as availability failures. A 429 preserves
+prior failure counts and releases a half-open probe without closing the circuit.
+An uncertain send waits for cooldown and probes the same provider with its original key; it never
 fails over solely because the circuit opened. Breaker state is in memory and
 resets on worker restart; multiple worker processes have independent breakers.
 A cluster-wide retry budget and shared durable breaker state remain future work.

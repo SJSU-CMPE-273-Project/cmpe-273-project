@@ -47,6 +47,21 @@ func (b *providerBreakers) allow(provider string, now time.Time) (bool, uint64, 
 	return true, s.generation, 0
 }
 
+// Back pressure says nothing about provider health. Preserve failures and the
+// open circuit, but release a half-open probe so the next retry can test it.
+func (b *providerBreakers) recordBackPressure(provider string, generation uint64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	s := b.states[provider]
+	if s.generation != generation {
+		return
+	}
+	if s.probing {
+		s.probing = false
+		s.generation++
+	}
+}
+
 func (b *providerBreakers) record(provider string, generation uint64, failed bool, now time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
