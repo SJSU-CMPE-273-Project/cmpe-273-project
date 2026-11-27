@@ -394,7 +394,7 @@ flowchart LR
 
 | Risk | Control |
 |---|---|
-| Prompt injection (message content tries to instruct the agent) | Message bodies are passed as data, never as instructions; the agent cannot act without human approval |
+| Prompt injection (message content tries to instruct the agent) | Message bodies are excluded entirely; reason, provider and error code use closed vocabularies; the agent cannot act without human approval |
 | Sensitive information disclosure | PII masked before it reaches the model |
 | Excessive agency | Read-only tools; one `propose_action` tool; human approval; replay cap |
 
@@ -402,19 +402,38 @@ flowchart LR
 
 The ops agent is the only part of RelayGuard that uses an LLM, so token cost scales with DLQ volume, not with total message volume.
 
-| Item | Estimate (to be measured) |
-|---|---|
-| Tokens per DLQ item (input + output) | [__] |
-| Cost per 1,000 DLQ items | [$__] |
-| DLQ items per day at demo load | [__] |
-| Cost per day | [$__] |
+The reproducible [offline baseline](agent/evals/economics-baseline.json) uses the four
+fixed eval scenarios. No API key was available for this run; **live-model token
+measurements and prompt quality remain unverified**. Mocked integration usage is
+not counted as measured model usage.
 
-**Strategies to keep cost down:**
-- Batch similar DLQ items (e.g. all items from one provider outage) into one request
-- Use a small, cheap model for classification and a larger model only for unclear cases
-- Send masked summaries of attempt history, not raw logs
-- Cache results for repeated failure patterns
-- Hard daily token budget; when it is reached, the agent stops and the DLQ is handled manually
+| Item | Offline measurement / conservative projection |
+|---|---|
+| External calls / billed tokens / cost in baseline | 0 / 0 / $0 |
+| Reserved tokens per fixture (input bound + output cap) | 5,888–5,997, including 256 output tokens |
+| Cost per 1,000 items with the largest fixture | At most $2.706 (projection, not observed usage) |
+| DLQ items in the fixed eval workload | 4; production daily volume has not been measured |
+| Default daily token budget / cost ceiling | 100,000 tokens / $0.16 at configured rates |
+
+Pricing defaults for `gpt-4.1-mini`: $0.40 input and $1.60 output per million tokens
+([OpenAI model pricing](https://developers.openai.com/api/docs/models/gpt-4.1-mini)).
+Cost is `(input_tokens × input_rate + output_tokens × output_rate) / 1,000,000`.
+Set both rate variables when selecting a different model. Costs are estimates,
+excluding discounts, taxes and non-agent traffic.
+
+Generate the baseline with `node agent/evals/economics.js`. Run real prompt evals
+with `OPENAI_API_KEY` configured and
+`AGENT_EVAL_REPORT=agent/evals/live-results.json node agent/evals/run.js`.
+The live command writes provider-reported counts and costs and fails on any
+fallback or wrong action. Replace projections with that report after a live run.
+The console shows today's UTC token counts, estimated cost and reserved budget.
+
+Implemented controls: at most 20 allowlisted attempts, no raw bodies or identifiers,
+256 output tokens per request, a 15-second timeout, no automatic model retries,
+and atomic daily budget reservation in PostgreSQL. Unknown usage after an outage
+retains the reservation and shows an upper-bound cost; no-key calls cost zero.
+Budget exhaustion uses the existing deterministic policy and still requires human
+approval. Caching and batching are future optimizations.
 
 ### Deployment
 

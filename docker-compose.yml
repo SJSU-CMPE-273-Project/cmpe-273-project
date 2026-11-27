@@ -290,6 +290,29 @@ services:
       - "4317:4317"
       - "4318:4318"
 
+  ops-console:
+    build:
+      context: ./services/ops-console-react
+      additional_contexts:
+        prompts: ./agent/prompts
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-relayguard}:${POSTGRES_PASSWORD:-relayguard}@postgres:5432/${POSTGRES_DB:-relayguard}
+      OPERATOR_TOKEN: ${OPERATOR_TOKEN:-}
+      REPLAY_DAILY_CAP: ${REPLAY_DAILY_CAP:-20}
+      AGENT_PROMPT_VERSION: ${AGENT_PROMPT_VERSION:-dlq-v1}
+      AGENT_MODEL: ${AGENT_MODEL:-gpt-4.1-mini}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      AGENT_DAILY_TOKEN_BUDGET: ${AGENT_DAILY_TOKEN_BUDGET:-100000}
+      AGENT_INPUT_USD_PER_MILLION: ${AGENT_INPUT_USD_PER_MILLION:-0.40}
+      AGENT_OUTPUT_USD_PER_MILLION: ${AGENT_OUTPUT_USD_PER_MILLION:-1.60}
+    ports:
+      - "18083:3000"
+    read_only: true
+    tmpfs: [/tmp]
+
 volumes:
   pgdata:
   iggydata:

@@ -1,0 +1,50 @@
+name: Agent prompt evaluation
+on:
+  pull_request:
+    paths: ['agent/**', 'services/ops-console-react/**', '.github/workflows/agent-evals.yml']
+  push:
+    paths: ['agent/**', 'services/ops-console-react/**', '.github/workflows/agent-evals.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  harness:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: relayguard_agent_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      AGENT_TEST_DATABASE_URL: postgresql://postgres:test@localhost:5432/relayguard_agent_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: services/ops-console-react/package-lock.json
+      - run: npm ci && npm test && npm run build
+        working-directory: services/ops-console-react
+  live-prompts:
+    runs-on: ubuntu-latest
+    # Fork PRs cannot access secrets. Run live evals on trusted pushes and manual runs.
+    if: github.event_name != 'pull_request'
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      AGENT_EVAL_REPORT: agent-eval-results.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node agent/evals/run.js
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agent-eval-results
+          path: agent-eval-results.json
