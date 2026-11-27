@@ -27,3 +27,7 @@ CREATE TABLE IF NOT EXISTS agent_proposals (
   approved_by TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Console metrics also work on older volumes before the ingest identity upgrade.
+CREATE OR REPLACE VIEW ingest_rejection_counts AS
+  SELECT count(*) AS total FROM ingest_rejections;

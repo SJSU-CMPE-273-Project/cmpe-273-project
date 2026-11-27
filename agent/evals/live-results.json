@@ -1,0 +1,68 @@
+{
+  "at": "2026-11-27T21:36:32.953Z",
+  "kind": "live",
+  "prompt_version": "dlq-v1",
+  "provider": "gemini",
+  "model": "gemini-3.5-flash-lite",
+  "input_tokens": 1044,
+  "output_tokens": 137,
+  "cost_usd": 0,
+  "results": [
+    {
+      "name": "expired OTP",
+      "expected": "discard",
+      "prompt_version": "dlq-v1",
+      "model": "gemini-3.5-flash-lite",
+      "input_tokens": 242,
+      "output_tokens": 36,
+      "cost_usd": 0,
+      "action": "escalate",
+      "rationale": "Resource exhaustion requires operational review and recovery confirmation.",
+      "risk": "high",
+      "source": "model",
+      "usage_uncertain": false
+    },
+    {
+      "name": "poison after fix",
+      "expected": "replay",
+      "prompt_version": "dlq-v1",
+      "model": "gemini-3.5-flash-lite",
+      "input_tokens": 282,
+      "output_tokens": 41,
+      "cost_usd": 0,
+      "action": "replay",
+      "rationale": "The failure reason indicates the issue is resolved following a fix and provider recovery.",
+      "risk": "medium",
+      "source": "model",
+      "usage_uncertain": false
+    },
+    {
+      "name": "provider outage",
+      "expected": "escalate",
+      "prompt_version": "dlq-v1",
+      "model": "gemini-3.5-flash-lite",
+      "input_tokens": 281,
+      "output_tokens": 28,
+      "cost_usd": 0,
+      "action": "escalate",
+      "rationale": "Provider outage requires verification of recovery before safe retry.",
+      "risk": "high",
+      "source": "model",
+      "usage_uncertain": false
+    },
+    {
+      "name": "body injection excluded",
+      "expected": "escalate",
+      "prompt_version": "dlq-v1",
+      "model": "gemini-3.5-flash-lite",
+      "input_tokens": 239,
+      "output_tokens": 32,
+      "cost_usd": 0,
+      "action": "escalate",
+      "rationale": "The failure reason is unknown and ambiguous, which requires human operator review.",
+      "risk": "high",
+      "source": "model",
+      "usage_uncertain": false
+    }
+  ]
+}

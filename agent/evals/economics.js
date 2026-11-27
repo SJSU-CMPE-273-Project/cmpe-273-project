@@ -16,7 +16,7 @@ const cases = require('./dlq.json');
       baseline: result });
   }
   console.log(JSON.stringify({ kind: 'offline-baseline-and-projection', prompt_version: c.version,
-    model: c.model, scenarios: rows.length, external_calls: 0, measured_tokens: 0, measured_cost_usd: 0,
+    provider: c.provider, model: c.model, scenarios: rows.length, external_calls: 0, measured_tokens: 0, measured_cost_usd: 0,
     daily_token_budget: c.budget, daily_cost_bound_usd: c.budget * Math.max(c.inputRate, c.outputRate) / 1e6,
     rows }, null, 2));
 })();

@@ -402,34 +402,45 @@ flowchart LR
 
 The ops agent is the only part of RelayGuard that uses an LLM, so token cost scales with DLQ volume, not with total message volume.
 
-The reproducible [offline baseline](agent/evals/economics-baseline.json) uses the four
-fixed eval scenarios. No API key was available for this run; **live-model token
-measurements and prompt quality remain unverified**. Mocked integration usage is
-not counted as measured model usage.
+The [passing live Gemini run](agent/evals/results/dlq-v2-gemini-2026-11-27.json)
+on November 27 used the active `dlq-v2` prompt with `gemini-3.5-flash-lite`.
+All four fixed eval cases passed with model responses. These are actual
+provider-reported token counts; the $0 cost uses configured free-tier rates.
+The [v1 baseline](agent/evals/results/dlq-v1-gemini-2026-11-27.json) passed 3/4;
+v2 made expiry precedence explicit to correct that failure.
 
-| Item | Offline measurement / conservative projection |
+| Item | Live v2 run measurement |
 |---|---|
-| External calls / billed tokens / cost in baseline | 0 / 0 / $0 |
-| Reserved tokens per fixture (input bound + output cap) | 5,888–5,997, including 256 output tokens |
-| Cost per 1,000 items with the largest fixture | At most $2.706 (projection, not observed usage) |
-| DLQ items in the fixed eval workload | 4; production daily volume has not been measured |
-| Default daily token budget / cost ceiling | 100,000 tokens / $0.16 at configured rates |
+| Input / output tokens across four items | 2,120 / 112 |
+| Average tokens per DLQ item (input + output) | 558 (530 input + 28 output) |
+| Cost per 1,000 items at configured free-tier rates | $0 |
+| Items evaluated / passing | 4 / 4 |
+| Estimated cost of this run | $0; actual billing depends on the Google project tier |
+| Default daily token budget | 100,000 tokens |
 
-Pricing defaults for `gpt-4.1-mini`: $0.40 input and $1.60 output per million tokens
-([OpenAI model pricing](https://developers.openai.com/api/docs/models/gpt-4.1-mini)).
+The reproducible [offline baseline](agent/evals/economics-baseline.json) records
+zero external calls, zero measured tokens and $0 spending; its reservation bounds
+are projections, distinct from the live measurements above. Production daily DLQ
+volume has not been measured.
+
+The default provider is Gemini (`gemini-3.5-flash-lite`), with $0 input/output
+accounting rates for the [Google free tier](https://ai.google.dev/gemini-api/docs/pricing).
+Quotas and model availability depend on the Google project. Configure actual rates
+if billing is enabled; setting a rate to zero here does not disable provider billing.
+Free-tier content may be used to improve Google products; raw bodies and PII remain excluded.
+OpenAI is still selectable with `AGENT_PROVIDER=openai` (default `gpt-4.1-mini`,
+$0.40 input/$1.60 output per million tokens).
 Cost is `(input_tokens × input_rate + output_tokens × output_rate) / 1,000,000`.
-Set both rate variables when selecting a different model. Costs are estimates,
-excluding discounts, taxes and non-agent traffic.
-
+Costs exclude taxes, hosting and non-agent traffic.
 Generate the baseline with `node agent/evals/economics.js`. Run real prompt evals
-with `OPENAI_API_KEY` configured and
+with `GEMINI_API_KEY` configured and
 `AGENT_EVAL_REPORT=agent/evals/live-results.json node agent/evals/run.js`.
 The live command writes provider-reported counts and costs and fails on any
 fallback or wrong action. Replace projections with that report after a live run.
 The console shows today's UTC token counts, estimated cost and reserved budget.
 
 Implemented controls: at most 20 allowlisted attempts, no raw bodies or identifiers,
-256 output tokens per request, a 15-second timeout, no automatic model retries,
+1,024 Gemini output tokens per request (including reasoning), a 15-second timeout, no automatic model retries,
 and atomic daily budget reservation in PostgreSQL. Unknown usage after an outage
 retains the reservation and shows an upper-bound cost; no-key calls cost zero.
 Budget exhaustion uses the existing deterministic policy and still requires human

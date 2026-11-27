@@ -1,22 +1,23 @@
 {
   "kind": "offline-baseline-and-projection",
-  "prompt_version": "dlq-v1",
-  "model": "gpt-4.1-mini",
+  "prompt_version": "dlq-v2",
+  "provider": "gemini",
+  "model": "gemini-3.5-flash-lite",
   "scenarios": 4,
   "external_calls": 0,
   "measured_tokens": 0,
   "measured_cost_usd": 0,
   "daily_token_budget": 100000,
-  "daily_cost_bound_usd": 0.16,
+  "daily_cost_bound_usd": 0,
   "rows": [
     {
       "name": "expired OTP",
-      "input_bound": 5642,
-      "output_cap": 256,
-      "total_reserved": 5898,
-      "cost_bound_usd": 0.0026664,
+      "input_bound": 6914,
+      "output_cap": 1024,
+      "total_reserved": 7938,
+      "cost_bound_usd": 0,
       "baseline": {
-        "prompt_version": "dlq-v1",
+        "prompt_version": "dlq-v2",
         "model": "rules",
         "input_tokens": 0,
         "output_tokens": 0,
@@ -24,17 +25,20 @@
         "action": "discard",
         "rationale": "The message has expired and must not be delivered late.",
         "risk": "low",
-        "source": "model_unavailable"
+        "source": "model_unavailable",
+        "model_error": {
+          "type": "missing_key"
+        }
       }
     },
     {
       "name": "poison after fix",
-      "input_bound": 5741,
-      "output_cap": 256,
-      "total_reserved": 5997,
-      "cost_bound_usd": 0.002706,
+      "input_bound": 7013,
+      "output_cap": 1024,
+      "total_reserved": 8037,
+      "cost_bound_usd": 0,
       "baseline": {
-        "prompt_version": "dlq-v1",
+        "prompt_version": "dlq-v2",
         "model": "rules",
         "input_tokens": 0,
         "output_tokens": 0,
@@ -42,17 +46,20 @@
         "action": "replay",
         "rationale": "Provider rejection; replay only after the provider is fixed and a human approves.",
         "risk": "high",
-        "source": "model_unavailable"
+        "source": "model_unavailable",
+        "model_error": {
+          "type": "missing_key"
+        }
       }
     },
     {
       "name": "provider outage",
-      "input_bound": 5725,
-      "output_cap": 256,
-      "total_reserved": 5981,
-      "cost_bound_usd": 0.0026996,
+      "input_bound": 6997,
+      "output_cap": 1024,
+      "total_reserved": 8021,
+      "cost_bound_usd": 0,
       "baseline": {
-        "prompt_version": "dlq-v1",
+        "prompt_version": "dlq-v2",
         "model": "rules",
         "input_tokens": 0,
         "output_tokens": 0,
@@ -60,17 +67,20 @@
         "action": "escalate",
         "rationale": "Verify provider recovery before replay.",
         "risk": "high",
-        "source": "model_unavailable"
+        "source": "model_unavailable",
+        "model_error": {
+          "type": "missing_key"
+        }
       }
     },
     {
       "name": "body injection excluded",
-      "input_bound": 5632,
-      "output_cap": 256,
-      "total_reserved": 5888,
-      "cost_bound_usd": 0.0026624,
+      "input_bound": 6904,
+      "output_cap": 1024,
+      "total_reserved": 7928,
+      "cost_bound_usd": 0,
       "baseline": {
-        "prompt_version": "dlq-v1",
+        "prompt_version": "dlq-v2",
         "model": "rules",
         "input_tokens": 0,
         "output_tokens": 0,
@@ -78,7 +88,10 @@
         "action": "escalate",
         "rationale": "The failure is unclear; keep it in the DLQ for operator review.",
         "risk": "high",
-        "source": "model_unavailable"
+        "source": "model_unavailable",
+        "model_error": {
+          "type": "missing_key"
+        }
       }
     }
   ]

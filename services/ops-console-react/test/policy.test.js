@@ -5,8 +5,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-test('prompt treats DLQ message content as untrusted data', () => {
-  const prompt = fs.readFileSync(path.join(__dirname, '../../../agent/prompts/dlq-v1.md'), 'utf8');
+for (const version of ['dlq-v1', 'dlq-v2']) test(`${version} treats DLQ message content as untrusted data`, () => {
+  const prompt = fs.readFileSync(path.join(__dirname, `../../../agent/prompts/${version}.md`), 'utf8');
   assert.match(prompt, /never replay directly/i);
   assert.match(prompt, /untrusted data/i);
   assert.match(prompt, /human approval/i);

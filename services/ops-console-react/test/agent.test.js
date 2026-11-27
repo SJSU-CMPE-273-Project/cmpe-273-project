@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const agent = require('../agent');
 const cases = require('../../../agent/evals/dlq.json');
-const c = agent.config({ OPENAI_API_KEY: 'test' });
+const c = agent.config({ AGENT_PROVIDER: 'openai', OPENAI_API_KEY: 'test' });
 function accounting(allowed = true) {
   return { reserved: [], settled: [], async reserve(...args) { this.reserved.push(args); return allowed ? '2026-01-01' : null; },
     async settle(...args) { this.settled.push(args); } };
@@ -29,7 +29,7 @@ for (const item of cases) test(`harness contract: ${item.name} (mocked model)`, 
     reply({ action: item.expected, rationale: 'Human approval required.', risk: 'high' }));
   assert.equal(result.action, item.expected);
   assert.equal(result.source, 'model');
-  assert.equal(result.prompt_version, 'dlq-v1');
+  assert.equal(result.prompt_version, 'dlq-v2');
   assert.equal(result.input_tokens, 300);
   assert.equal(result.output_tokens, 40);
   assert.equal(result.cost_usd, 0.000184);
@@ -78,4 +78,100 @@ test('HTTP success with malformed response envelope escalates rather than using 
   }));
   assert.equal(result.action, 'escalate');
   assert.equal(result.source, 'invalid_output');
+});
+
+const gemini = agent.config({ GEMINI_API_KEY: 'gemini-test', OPENAI_API_KEY: 'wrong-provider' });
+test('Gemini is the default and never consumes an OpenAI key', () => {
+  assert.equal(gemini.provider, 'gemini');
+  assert.equal(gemini.model, 'gemini-3.5-flash-lite');
+  assert.equal(gemini.key, 'gemini-test');
+  assert.equal(gemini.inputRate, 0); assert.equal(gemini.outputRate, 0);
+  assert.equal(agent.config({ OPENAI_API_KEY: 'wrong-provider' }).key, undefined);
+  assert.throws(() => agent.config({ AGENT_PROVIDER: 'unknown' }));
+  const paid = agent.config({ AGENT_PROVIDER: 'openai', AGENT_INPUT_USD_PER_MILLION: '' });
+  assert.equal(paid.inputRate, 0.40);
+});
+for (const item of cases) test(`Gemini harness: ${item.name} (mocked provider)`, async () => {
+  const result = await agent.evaluate(item.row, item.attempts, gemini, accounting(), async (url, options) => {
+    assert.equal(url, 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions');
+    assert.equal(options.headers.Authorization, 'Bearer gemini-test');
+    assert.equal(options.redirect, 'error');
+    const body = JSON.parse(options.body);
+    assert.equal(body.messages[0].content, gemini.prompt);
+    assert.equal(body.model, 'gemini-3.5-flash-lite');
+    assert.equal(body.max_tokens, 1024);
+    assert.equal(body.reasoning_effort, 'minimal');
+    assert.equal(body.max_completion_tokens, undefined);
+    assert.equal(body.response_format.json_schema.strict, true);
+    assert.deepEqual(JSON.parse(body.messages[1].content), agent.summary(item.row, item.attempts));
+    return reply({ action: item.expected, rationale: 'Human approval required.', risk: 'high' })();
+  });
+  assert.equal(result.source, 'model'); assert.equal(result.action, item.expected);
+  assert.equal(result.model, 'gemini-3.5-flash-lite');
+  assert.equal(result.input_tokens, 300); assert.equal(result.output_tokens, 40);
+  assert.equal(result.cost_usd, 0);
+});
+test('Gemini refusal, invalid output, quota errors and budgets preserve guardrails', async () => {
+  for (const fetcher of [reply({ action: 'replay' }), reply({}, { choices: [] }),
+    reply({ action: 'replay', rationale: 'bad', risk: 'low' }, { usage: null })]) {
+    const result = await agent.evaluate(cases[1].row, [], gemini, accounting(), fetcher);
+    assert.equal(result.action, 'escalate'); assert.equal(result.source, 'invalid_output');
+  }
+  const outage = await agent.evaluate(cases[0].row, [], gemini, accounting(), async () => ({ ok: false, status: 429 }));
+  assert.equal(outage.action, 'discard'); assert.equal(outage.source, 'model_unavailable');
+  const exhausted = await agent.evaluate({}, [], gemini, accounting(false), () => { throw new Error('No model calls allowed'); });
+  assert.equal(exhausted.source, 'budget_exhausted');
+  const expired = await agent.evaluate(cases[0].row, [], gemini, accounting(), reply({ action: 'replay', rationale: 'bad', risk: 'low' }));
+  assert.equal(expired.source, 'invalid_output'); assert.equal(expired.action, 'escalate');
+});
+
+test('provider diagnostics preserve safe status and reason without echoing secrets', async () => {
+  for (const [status, type] of [[400, 'invalid_request'], [401, 'authentication'], [403, 'permission'],
+    [404, 'model_not_found'], [429, 'quota_or_rate_limit'], [503, 'provider_unavailable']]) {
+    const result = await agent.evaluate({}, [], gemini, accounting(), async () => ({ ok: false, status,
+      json: async () => ({ error: { status: 'INVALID_ARGUMENT', message: 'secret-key raw request PII',
+        details: [{ reason: 'API_KEY_INVALID' }] } }) }));
+    assert.equal(result.source, 'model_unavailable');
+    assert.deepEqual(result.model_error, { type, http_status: status, provider_code: 'INVALID_ARGUMENT', provider_reason: 'API_KEY_INVALID' });
+    assert.ok(!JSON.stringify(result).includes('secret-key'));
+  }
+  const result = await agent.evaluate({}, [], gemini, accounting(), async () => {
+    throw Object.assign(new Error('secret-key'), { cause: { code: 'ENOTFOUND' } });
+  });
+  assert.deepEqual(result.model_error, { type: 'network_error', network_code: 'ENOTFOUND' });
+});
+test('model-list helper paginates and never exposes key or provider error messages', async () => {
+  const { listModels } = require('../../../agent/evals/models');
+  let calls = 0;
+  const models = await listModels('secret-key', async (url, options) => {
+    calls++;
+    assert.ok(!url.includes('secret-key'));
+    assert.equal(options.headers['x-goog-api-key'], 'secret-key');
+    if (calls === 2) assert.equal(new URL(url).searchParams.get('pageToken'), 'next');
+    return { ok: true, json: async () => ({ models: [
+      { name: 'models/gemini-test', supportedGenerationMethods: ['generateContent'] },
+      { name: 'models/gemini-embedding', supportedGenerationMethods: ['embedContent'] }],
+      ...(calls === 1 ? { nextPageToken: 'next' } : {}) }) };
+  });
+  assert.deepEqual(models, ['gemini-test']); assert.equal(calls, 2);
+  await assert.rejects(listModels('', () => { throw new Error('must not call'); }), /GEMINI_API_KEY/);
+  await assert.rejects(listModels('secret-key', async () => ({ ok: false, status: 403,
+    json: async () => ({ error: { message: 'secret-key' } }) })), error => {
+    assert.match(error.message, /permission/); assert.ok(!error.message.includes('secret-key')); return true;
+  });
+});
+
+test('v2 is active by default and v1 remains available for comparison', () => {
+  const candidate = agent.config({ AGENT_PROMPT_VERSION: 'dlq-v2', GEMINI_API_KEY: 'test' });
+  assert.equal(candidate.version, 'dlq-v2');
+  assert.equal(candidate.prompt, gemini.prompt);
+  const previous = agent.config({ AGENT_PROMPT_VERSION: 'dlq-v1' });
+  assert.notEqual(candidate.prompt, previous.prompt);
+  for (const reason of ['channels_exhausted', 'provider_outage', 'poison', 'unknown']) {
+    const data = agent.summary({ priority: 1, reason, expires_at: '2020-01-01T00:00:00Z' }, []);
+    const body = agent.request(candidate, data);
+    assert.equal(JSON.parse(body.messages[1].content).expired, true);
+    assert.equal(JSON.parse(body.messages[1].content).reason, reason);
+    assert.equal(body.messages[0].content, candidate.prompt);
+  }
 });

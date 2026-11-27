@@ -35,7 +35,9 @@ jobs:
     # Fork PRs cannot access secrets. Run live evals on trusted pushes and manual runs.
     if: github.event_name != 'pull_request'
     env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      AGENT_PROMPT_VERSION: dlq-v2
+      AGENT_PROVIDER: gemini
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       AGENT_EVAL_REPORT: agent-eval-results.json
     steps:
       - uses: actions/checkout@v4

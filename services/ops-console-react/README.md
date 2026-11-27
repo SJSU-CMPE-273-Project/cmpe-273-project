@@ -1,6 +1,6 @@
 # RelayGuard Ops Console (Lane 4)
 
-**Owner:** Katherine · **Stack:** React, Express, PostgreSQL · **Local surface:** `localhost:18083`
+**Owner:** Katherine · **Stack:** React, Express, PostgreSQL · **Local surface:** `localhost:18084`
 
 ## What it includes
 
@@ -18,7 +18,8 @@
 POSTGRES_HOST_PORT=5434 docker compose up -d --build postgres ops-console demo-trigger
 ```
 
-Open `http://localhost:18083`.
+Open `http://localhost:18084`. The push/email adapter uses port `18083`;
+set `OPS_CONSOLE_HOST_PORT` to choose another console port.
 Set `OPERATOR_TOKEN` to require Bearer authentication:
 
 ```bash
@@ -80,10 +81,12 @@ Lane 2 is responsible for executing an approved row and must set `replayed_at` a
 
 ## Agent harness
 
-`agent.js` loads `agent/prompts/${AGENT_PROMPT_VERSION}.md` (default `dlq-v1`)
-as the system prompt and calls the OpenAI Chat Completions API with a strict
-JSON schema. `OPENAI_API_KEY` is server-only. `AGENT_MODEL` defaults to
-`gpt-4.1-mini`. The request contains only priority, normalized reason, expired
+`agent.js` loads `agent/prompts/${AGENT_PROMPT_VERSION}.md` (default `dlq-v2`)
+as the system prompt and calls Gemini through Google's OpenAI-compatible Chat
+Completions endpoint with a strict JSON schema. `GEMINI_API_KEY` is server-only.
+`AGENT_PROVIDER` defaults to `gemini`; `AGENT_MODEL` defaults to
+`gemini-3.5-flash-lite`. OpenAI remains available with `AGENT_PROVIDER=openai`
+and `OPENAI_API_KEY` (default model `gpt-4.1-mini`). The request contains only priority, normalized reason, expired
 boolean and up to 20 attempts (allowlisted provider, code, ISO time). Bodies,
 phone numbers, account numbers and arbitrary log text are excluded. Unknown
 reason/provider/code strings become `unknown`/`other`; no recovery is inferred
@@ -110,14 +113,37 @@ calls the replay endpoint or a delivery provider.
 
 | Variable | Default |
 |---|---|
-| `AGENT_PROMPT_VERSION` | `dlq-v1` |
-| `AGENT_MODEL` | `gpt-4.1-mini` |
-| `OPENAI_API_KEY` | empty → rules fallback |
+| `AGENT_PROMPT_VERSION` | `dlq-v2` |
+| `AGENT_PROVIDER` | `gemini` (`openai` also supported) |
+| `AGENT_MODEL` | `gemini-3.5-flash-lite` for Gemini; `gpt-4.1-mini` for OpenAI |
+| `GEMINI_API_KEY` | empty → rules fallback for Gemini |
+| `OPENAI_API_KEY` | used only when provider is `openai` |
 | `AGENT_DAILY_TOKEN_BUDGET` | `100000` |
-| `AGENT_INPUT_USD_PER_MILLION` | `0.40` |
-| `AGENT_OUTPUT_USD_PER_MILLION` | `1.60` |
+| `AGENT_INPUT_USD_PER_MILLION` | `0` for Gemini free tier; `0.40` for OpenAI |
+| `AGENT_OUTPUT_USD_PER_MILLION` | `0` for Gemini free tier; `1.60` for OpenAI |
 
-Set both prices when changing models. Prompt files are copied through Compose's
+Set both prices when changing models or using a paid Gemini project.
+These rates control accounting only; they do not change Google billing.
+Google lists free-tier quotas and data-use terms on its
+[pricing page](https://ai.google.dev/gemini-api/docs/pricing).
+The free tier may use content to improve Google products; only allowlisted summaries
+leave this service. A 429/quota error uses the existing rules fallback.
+
+Create a key in [Google AI Studio](https://aistudio.google.com/apikey).
+From a zsh terminal at the repository root, load it without shell-history exposure:
+
+```zsh
+read -rs 'GEMINI_API_KEY?Paste your Gemini API key: '
+echo
+export GEMINI_API_KEY
+AGENT_EVAL_REPORT=agent/evals/live-results.json node agent/evals/run.js
+docker compose up -d --build ops-console
+```
+
+Keep the key out of Git, browser code and chat. For GitHub Actions, add a
+repository Actions secret named `GEMINI_API_KEY`.
+
+Prompt files are copied through Compose's
 `prompts` additional build context; rebuild the console after prompt changes.
 For an existing database, apply these additive migrations without deleting data:
 
@@ -129,7 +155,9 @@ docker compose up -d --build ops-console
 
 The budget is shared by all console instances. Before any model call, PostgreSQL
 atomically reserves a conservative UTF-8 byte bound plus schema/framing allowance
-and the 256-token output cap. Known usage settles to provider counts. Timeouts,
+and the output cap (1,024 tokens for Gemini, including reasoning; 256 for OpenAI).
+Gemini uses `reasoning_effort=minimal`; truncated output still fails closed.
+Known usage settles to provider counts. Timeouts,
 errors, crashes and missing usage keep the reservation; timeout/error costs use
 a conservative bound. A crash before settlement can leave cost unrecorded but
 cannot release budget. Daily accounting is independent of proposal insertion,
@@ -141,7 +169,7 @@ so an insert failure does not erase model spending. Requests never retry.
 npm ci
 npm test
 npm run build
-# Real provider run; fails if OPENAI_API_KEY is absent or any fallback occurs:
+# Real provider run; fails if the selected provider key is absent or any fallback occurs:
 AGENT_EVAL_REPORT=../../agent/evals/live-results.json npm run eval:live
 # Reproduce zero-call baseline and conservative projections:
 node ../../agent/evals/economics.js
@@ -151,7 +179,7 @@ The fixed eval set covers expired OTP, poison after fix, provider outage and
 body injection. Offline contract tests mock the provider; they verify harness
 behavior, not model classification quality. CI runs them and database integration
 checks on every harness/prompt change, with live evals on trusted pushes/manual
-runs using repository secret `OPENAI_API_KEY`. Fork PRs never receive that secret.
+runs using repository secret `GEMINI_API_KEY`. Fork PRs never receive that secret.
 The live job fails if the secret is missing; it cannot report a false pass.
 
 For local database integration tests, create a fresh disposable database named
@@ -160,11 +188,50 @@ The test applies migrations, verifies concurrent reservations, exercises proposa
 creation/listing/usage, and verifies no replay intent exists until an explicit
 human replay request. Without the URL this integration test is skipped.
 
-The committed [baseline](../../agent/evals/economics-baseline.json) has 4 scenarios,
-0 external calls, 0 measured tokens and $0 measured spend. Fixture reservation
-bounds are 5,888–5,997 tokens; the largest fixture projects at most $2.706 per
-1,000 items at default rates. Live model measurements remain pending credentials.
-Do not present mocked counts or conservative bounds as measured model economics.
+The [passing v2 live run](../../agent/evals/results/dlq-v2-gemini-2026-11-27.json)
+measured 2,120 input and 112 output tokens across four fixtures: 558 total tokens
+per item (530 input + 28 output). All four expected actions passed with
+`source=model`; estimated cost is $0 at configured free-tier rates. This is one
+small eval run, not a production quality or volume estimate.
+
+The [first v1 run](../../agent/evals/results/dlq-v1-gemini-2026-11-27.json)
+passed 3/4: the model confused `channels_exhausted` with resource exhaustion and
+escalated the expired OTP. `dlq-v2` adds explicit ordered rules and expiry examples.
+The console and CI now default to v2; v1 remains available for comparison.
+
+Re-run the active prompt from the repository root:
+
+```zsh
+AGENT_EVAL_REPORT=agent/evals/live-results-v2.json node agent/evals/run.js
+```
+
+A passing eval requires `source=model` and the expected action for all four
+cases. Fallbacks or postprocessing cannot turn a model failure into a passing
+eval. The committed [offline baseline](../../agent/evals/economics-baseline.json)
+records zero external calls; reservation bounds are separate projections.
+
+## Troubleshooting live eval failures
+
+`source: model_unavailable` means the rules fallback ran, not that the model eval
+passed. Live results now include safe `model_error` diagnostics: HTTP status,
+closed error category, recognized provider codes, or recognized network codes.
+Raw error messages, prompts and API keys are never included.
+
+From the same terminal where you exported the key:
+
+```bash
+node agent/evals/models.js
+AGENT_EVAL_REPORT=agent/evals/live-results.json node agent/evals/run.js
+```
+
+The first command lists Gemini text-generation models visible to your key using
+Google's [models endpoint](https://ai.google.dev/api/models). Listing a model does
+not establish free-tier quota or JSON schema support. Use `AGENT_MODEL` to select
+an available compatible model after checking its capabilities. A `404` indicates
+a missing model/resource, `401`/`403` points to authentication or access, `429`
+indicates quota/rate limits, and `400` indicates an invalid request (including
+some key/configuration errors). Do not infer a specific cause from the fallback
+alone. Share only `model_error` and model names when requesting help.
 
 ## Security
 

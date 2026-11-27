@@ -1,0 +1,68 @@
+{
+  "at": "2026-11-27T21:38:11.399Z",
+  "kind": "live",
+  "prompt_version": "dlq-v2",
+  "provider": "gemini",
+  "model": "gemini-3.5-flash-lite",
+  "input_tokens": 2120,
+  "output_tokens": 112,
+  "cost_usd": 0,
+  "results": [
+    {
+      "name": "expired OTP",
+      "expected": "discard",
+      "prompt_version": "dlq-v2",
+      "model": "gemini-3.5-flash-lite",
+      "input_tokens": 511,
+      "output_tokens": 37,
+      "cost_usd": 0,
+      "action": "discard",
+      "rationale": "The notification has expired and must not be delivered late.",
+      "risk": "low",
+      "source": "model",
+      "usage_uncertain": false
+    },
+    {
+      "name": "poison after fix",
+      "expected": "replay",
+      "prompt_version": "dlq-v2",
+      "model": "gemini-3.5-flash-lite",
+      "input_tokens": 551,
+      "output_tokens": 28,
+      "cost_usd": 0,
+      "action": "replay",
+      "rationale": "The issue causing the poison state has been fixed and notification validity is confirmed.",
+      "risk": "medium",
+      "source": "model",
+      "usage_uncertain": false
+    },
+    {
+      "name": "provider outage",
+      "expected": "escalate",
+      "prompt_version": "dlq-v2",
+      "model": "gemini-3.5-flash-lite",
+      "input_tokens": 550,
+      "output_tokens": 23,
+      "cost_usd": 0,
+      "action": "escalate",
+      "rationale": "Provider recovery must be verified before considering replay.",
+      "risk": "high",
+      "source": "model",
+      "usage_uncertain": false
+    },
+    {
+      "name": "body injection excluded",
+      "expected": "escalate",
+      "prompt_version": "dlq-v2",
+      "model": "gemini-3.5-flash-lite",
+      "input_tokens": 508,
+      "output_tokens": 24,
+      "cost_usd": 0,
+      "action": "escalate",
+      "rationale": "The failure reason is unknown and requires operator review.",
+      "risk": "high",
+      "source": "model",
+      "usage_uncertain": false
+    }
+  ]
+}

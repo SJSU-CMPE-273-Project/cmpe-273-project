@@ -8,18 +8,25 @@ const schema = {
     rationale: { type: 'string' }, risk: { type: 'string', enum: ['low', 'medium', 'high'] } },
 };
 function config(env = process.env) {
-  const version = env.AGENT_PROMPT_VERSION || 'dlq-v1';
+  const version = env.AGENT_PROMPT_VERSION || 'dlq-v2';
   if (!/^dlq-v[1-9][0-9]*$/.test(version)) throw new Error('Invalid prompt version');
+  const provider = env.AGENT_PROVIDER || 'gemini';
+  if (!['gemini', 'openai'].includes(provider)) throw new Error('Invalid AGENT_PROVIDER');
+  const gemini = provider === 'gemini';
   const number = (key, value, integer = false) => {
-    const n = Number(env[key] ?? value);
+    const n = Number(env[key] === '' ? value : (env[key] ?? value));
     if (!Number.isFinite(n) || n < 0 || (integer && !Number.isSafeInteger(n))) throw new Error(`Invalid ${key}`);
     return n;
   };
-  return { version, model: env.AGENT_MODEL || 'gpt-4.1-mini', key: env.OPENAI_API_KEY,
+  return { version, provider, model: env.AGENT_MODEL || (gemini ? 'gemini-3.5-flash-lite' : 'gpt-4.1-mini'),
+    key: gemini ? env.GEMINI_API_KEY : env.OPENAI_API_KEY,
+    keyVariable: gemini ? 'GEMINI_API_KEY' : 'OPENAI_API_KEY',
+    endpoint: gemini ? 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
+      : 'https://api.openai.com/v1/chat/completions',
     prompt: fs.readFileSync(path.join(__dirname, '../../agent/prompts', `${version}.md`), 'utf8'),
     budget: number('AGENT_DAILY_TOKEN_BUDGET', 100000, true),
-    inputRate: number('AGENT_INPUT_USD_PER_MILLION', 0.40),
-    outputRate: number('AGENT_OUTPUT_USD_PER_MILLION', 1.60), maxOutput: 256 };
+    inputRate: number('AGENT_INPUT_USD_PER_MILLION', gemini ? 0 : 0.40),
+    outputRate: number('AGENT_OUTPUT_USD_PER_MILLION', gemini ? 0 : 1.60), maxOutput: gemini ? 1024 : 256 };
 }
 // Only closed vocabularies cross the model boundary. Raw logs may contain PII.
 function summary(row, attempts, now = new Date()) {
@@ -48,7 +55,9 @@ function fallback(data, source) {
 }
 function request(config, data) {
   return { model: config.model, messages: [{ role: 'system', content: config.prompt },
-    { role: 'user', content: JSON.stringify(data) }], max_completion_tokens: config.maxOutput,
+    { role: 'user', content: JSON.stringify(data) }],
+    ...(config.provider === 'gemini' ? { max_tokens: config.maxOutput, reasoning_effort: 'minimal' }
+      : { max_completion_tokens: config.maxOutput }),
     response_format: { type: 'json_schema', json_schema: { name: 'dlq_proposal', strict: true, schema } } };
 }
 function validate(value) {
@@ -57,10 +66,34 @@ function validate(value) {
     typeof value.rationale === 'string' && value.rationale.trim().length > 0 && value.rationale.length <= 1000;
 }
 function cost(input, output, c) { return (input * c.inputRate + output * c.outputRate) / 1e6; }
+// Diagnostics contain only closed categories, never provider messages or credentials.
+async function httpFailure(response) {
+  const status = Number.isInteger(response.status) ? response.status : 0;
+  const types = { 400: 'invalid_request', 401: 'authentication', 403: 'permission',
+    404: 'model_not_found', 429: 'quota_or_rate_limit' };
+  let json;
+  try { json = typeof response.json === 'function' ? await response.json() : null; } catch { /* omit raw body */ }
+  const codes = ['INVALID_ARGUMENT', 'UNAUTHENTICATED', 'PERMISSION_DENIED', 'NOT_FOUND',
+    'RESOURCE_EXHAUSTED', 'FAILED_PRECONDITION', 'UNAVAILABLE', 'INTERNAL'];
+  const reasons = ['API_KEY_INVALID', 'API_KEY_EXPIRED', 'SERVICE_DISABLED',
+    'API_KEY_SERVICE_BLOCKED', 'API_KEY_HTTP_REFERRER_BLOCKED', 'API_KEY_IP_ADDRESS_BLOCKED'];
+  const reason = Array.isArray(json?.error?.details)
+    ? json.error.details.map(detail => detail?.reason).find(reason => reasons.includes(reason)) : undefined;
+  return { type: types[status] || (status >= 500 ? 'provider_unavailable' : 'http_error'),
+    http_status: status, ...(codes.includes(json?.error?.status) ? { provider_code: json.error.status } : {}),
+    ...(reason ? { provider_reason: reason } : {}) };
+}
+function networkFailure(error) {
+  const code = error?.cause?.code ?? error?.code;
+  const known = ['ENOTFOUND', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT',
+    'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'SELF_SIGNED_CERT_IN_CHAIN', 'CERT_HAS_EXPIRED'];
+  return { type: ['TimeoutError', 'AbortError'].includes(error?.name) ? 'timeout' : 'network_error',
+    ...(known.includes(code) ? { network_code: code } : {}) };
+}
 async function evaluate(row, attempts, c, accounting, fetcher = fetch) {
   const data = summary(row, attempts);
   const base = { prompt_version: c.version, model: 'rules', input_tokens: 0, output_tokens: 0, cost_usd: 0 };
-  if (!c.key) return { ...base, ...fallback(data, 'model_unavailable') };
+  if (!c.key) return { ...base, ...fallback(data, 'model_unavailable'), model_error: { type: 'missing_key' } };
   const body = request(c, data);
   // UTF-8 bytes bound text tokens conservatively; extra space covers schema/chat framing.
   const inputBound = Buffer.byteLength(JSON.stringify(body)) + 4096;
@@ -69,12 +102,16 @@ async function evaluate(row, attempts, c, accounting, fetcher = fetch) {
   if (!ticket) return { ...base, ...fallback(data, 'budget_exhausted') };
   let usage;
   let result;
+  let modelError;
   try {
-    const response = await fetcher('https://api.openai.com/v1/chat/completions', {
+    const response = await fetcher(c.endpoint, {
       method: 'POST', headers: { Authorization: `Bearer ${c.key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(body), redirect: 'error', signal: AbortSignal.timeout(15000),
     });
-    if (!response.ok) throw new Error('Model unavailable');
+    if (!response.ok) {
+      modelError = await httpFailure(response);
+      throw new Error('Model unavailable');
+    }
     const json = (await response.json().catch(() => null)) || {};
     if (Number.isSafeInteger(json.usage?.prompt_tokens) && json.usage.prompt_tokens >= 0 &&
         Number.isSafeInteger(json.usage?.completion_tokens) && json.usage.completion_tokens >= 0) usage = json.usage;
@@ -87,7 +124,8 @@ async function evaluate(row, attempts, c, accounting, fetcher = fetch) {
     // TTL is enforced even if the model returns a valid but unsafe recommendation.
     if (data.expired && result.action === 'replay') result = {
       action: 'escalate', rationale: 'Model attempted replay of an expired message; human review required.', risk: 'high', source: 'invalid_output' };
-  } catch {
+  } catch (error) {
+    modelError ||= networkFailure(error);
     result = fallback(data, 'model_unavailable');
   }
   const input = usage?.prompt_tokens || 0, output = usage?.completion_tokens || 0;
@@ -95,7 +133,7 @@ async function evaluate(row, attempts, c, accounting, fetcher = fetch) {
   const usd = usage ? cost(input, output, c) : cost(inputBound, c.maxOutput, c);
   await accounting.settle(ticket, reserve, usage ? input + output : reserve, input, output, usd);
   return { ...base, ...result, model: c.model, input_tokens: input, output_tokens: output,
-    cost_usd: usd, usage_uncertain: !usage };
+    cost_usd: usd, usage_uncertain: !usage, ...(modelError ? { model_error: modelError } : {}) };
 }
 function accounting(pool) {
   return {
@@ -113,4 +151,4 @@ function accounting(pool) {
     },
   };
 }
-module.exports = { config, summary, fallback, request, validate, evaluate, accounting, cost };
+module.exports = { config, summary, fallback, request, validate, evaluate, accounting, cost, httpFailure, networkFailure };
