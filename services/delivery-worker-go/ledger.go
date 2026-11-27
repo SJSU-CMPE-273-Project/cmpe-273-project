@@ -8,6 +8,7 @@ import (
 	pb "github.com/SJSU-CMPE-273-Project/cmpe-273-project/gen/go/relayguard/v1"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel/attribute"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
 	"google.golang.org/protobuf/proto"
@@ -132,6 +133,8 @@ func resultCode(r Result) string {
 }
 
 func (l *Ledger) Expire(ctx context.Context, e *pb.NotificationRequested) error {
+	ctx, span := startEventSpan(ctx, "delivery.expire", e)
+	defer span.End()
 	c, err := l.lock(ctx, e.EventId)
 	if err != nil {
 		return err
@@ -145,6 +148,9 @@ func (l *Ledger) Expire(ctx context.Context, e *pb.NotificationRequested) error 
 }
 
 func (l *Ledger) DeadLetter(ctx context.Context, e *pb.NotificationRequested, reason string) error {
+	ctx, span := startEventSpan(ctx, "delivery.dead_letter", e)
+	span.SetAttributes(attribute.String("relayguard.dlq_reason", reason))
+	defer span.End()
 	c, err := l.lock(ctx, e.EventId)
 	if err != nil {
 		return err

@@ -29,6 +29,9 @@ type Adapters struct {
 }
 
 func (a *Adapters) Send(ctx context.Context, attempt Attempt) (result Result, sendErr error) {
+	// Registered first so it runs last and records the final result.
+	ctx, span := startAttemptSpan(ctx, attempt)
+	defer func() { endAttemptSpan(span, result, sendErr) }()
 	// A prior activity execution may have reached the provider before a crash.
 	// Even a later definitive failure cannot prove that earlier send did not land.
 	defer func() {
@@ -80,7 +83,7 @@ func (a *Adapters) Send(ctx context.Context, attempt Attempt) (result Result, se
 	req.GetBody = nil
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", e.EventId)
-	req.Header.Set("traceparent", e.Traceparent)
+	req.Header.Set("traceparent", outgoingTraceparent(ctx, e))
 	c := a.Client
 	if c == nil {
 		c = &http.Client{Timeout: 10 * time.Second}
