@@ -376,6 +376,7 @@ flowchart LR
 - **Tools (read-only by default):** read DLQ items, read attempt history, read provider and circuit-breaker status. The only write tool is `propose_action`; it does not replay anything itself.
 - **Prompts:** system and task prompts are stored in `agent/prompts/` and versioned with the code. Each proposal records the prompt version that produced it.
 - **Guardrails on the agent:** max replays per run, no replay of expired messages, rate limits still apply, PII masked before anything reaches the model, and every proposal requires human approval.
+- **Human-approved replay:** approval and replay queueing commit together. The delivery worker consumes only approved requests and calls Issue B's existing replay workflow. Stable workflow IDs and database row locks make retries after crashes safe; the console shows dispatch status separately from delivery outcome.
 - **Evaluation:** a fixed set of DLQ scenarios (expired OTP, poison message, provider outage) with expected actions, run on every prompt change.
 
 ### Security and OWASP

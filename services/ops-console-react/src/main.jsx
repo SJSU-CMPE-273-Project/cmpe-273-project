@@ -56,7 +56,9 @@ function App() {
   }
 
   async function approve(id) {
-    try { await api(`/api/agent/proposals/${id}/approve`, { method: 'POST' }); setNotice('Proposal approved'); await refresh(); const proposal = proposals.find(p => p.id === id); if (proposal?.action === 'replay') await replay(proposal.event_id); }
+    const proposal = proposals.find(p => p.id === id);
+    if (proposal?.action === 'replay' && !confirm(`Approve replay of ${proposal.event_id}? The original event_id will be reused.`)) return;
+    try { await api(`/api/agent/proposals/${id}/approve`, { method: 'POST' }); setNotice(proposal?.action === 'replay' ? 'Replay approved and queued for the delivery worker' : 'Proposal approved'); await refresh(); }
     catch (error) { setNotice(error.message); }
   }
 
@@ -128,7 +130,8 @@ function App() {
               <td>{item.dead_lettered_at ? new Date(item.dead_lettered_at).toLocaleTimeString() : '—'}</td>
               {!publicDemo && <td className="actions">
                 <button className="ghost" onClick={() => evaluate(item.event_id)}>Ask agent</button>
-                <button className="primary" disabled={!!item.replayed_at} onClick={() => replay(item.event_id)}>{item.replayed_at ? 'Replayed' : 'Replay'}</button>
+                <button className="primary" disabled={!!item.replayed_at || !!item.replay_status} onClick={() => replay(item.event_id)}>{item.replayed_at ? 'Replayed' : item.replay_status || 'Replay'}</button>
+                {item.replay_status && <small>Replay {item.replay_status}: {item.replay_reason}</small>}
               </td>}
             </tr>)}</tbody>
           </table>
@@ -159,7 +162,7 @@ function App() {
       <div className="panel-head"><div><p>Human in the loop</p><h2>Agent proposals</h2><span>Today (UTC): {Number(usage.input_tokens || 0) + Number(usage.output_tokens || 0)} tokens · ${Number(usage.cost_usd || 0).toFixed(6)} estimated · budget {usage.budget_tokens || 0}/{usage.daily_budget || 0} (includes reservations)</span></div></div>
       {!proposals.length ? <div className="empty">No proposals</div> : proposals.map(p => <div className="proposal" key={p.id}>
         <div><span className={`action ${p.action}`}>{p.action}</span><code>{p.event_id?.slice(0, 8)}</code><small>Prompt {p.prompt_version} · {p.model} · {p.input_tokens} in / {p.output_tokens} out · {p.source}{p.usage_uncertain ? " · usage unknown; cost upper bound" : ""}</small></div>
-        <p>{p.rationale}<small>Risk: {p.risk}</small></p>
+        <p>{p.rationale}<small>Risk: {p.risk}</small>{p.replay_status && <small>Replay {p.replay_status}: {p.replay_reason}<br />{p.replay_workflow_id}</small>}</p>
         {p.approved == null ? <button className="primary" onClick={() => approve(p.id)}>Approve</button> : <span className="decision">{p.approved ? `Approved by ${p.approved_by}` : 'Rejected'}</span>}
       </div>)}
     </section>}

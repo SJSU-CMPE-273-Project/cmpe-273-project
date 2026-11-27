@@ -124,9 +124,11 @@ app.get('/api/dlq', authorized, async (_req, res, next) => {
     const result = await pool.query(`
       SELECT d.event_id::text, d.account_id, d.sequence, d.priority, d.state,
              d.attempts, d.expires_at, d.updated_at, dl.reason,
-             dl.dead_lettered_at, dl.replayed_at, dl.replayed_by
+             dl.dead_lettered_at, dl.replayed_at, dl.replayed_by,
+             rr.status AS replay_status, rr.reason AS replay_reason, rr.workflow_id AS replay_workflow_id
       FROM dead_letters dl
       JOIN deliveries d ON d.event_id=dl.event_id
+      LEFT JOIN replay_requests rr ON rr.event_id=dl.event_id
       ORDER BY dl.dead_lettered_at DESC LIMIT 500`);
     const rows = await Promise.all(result.rows.map(async row => {
       const attempts = await pool.query(`
@@ -138,56 +140,50 @@ app.get('/api/dlq', authorized, async (_req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.post('/api/dlq/:eventId/replay', mutationsDisabledInPublicDemo, authorized, async (req, res, next) => {
-  const operator = operatorName(req);
-  const eventId = req.params.eventId;
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const dlq = await client.query(`
-      SELECT dl.event_id, dl.replayed_at, d.expires_at, d.priority
-      FROM dead_letters dl JOIN deliveries d ON d.event_id=dl.event_id
-      WHERE dl.event_id=$1 FOR UPDATE`, [eventId]);
-    if (!dlq.rows[0]) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'dead-letter item not found' });
-    }
-    if (dlq.rows[0].replayed_at) {
-      await audit(operator, 'replay_refused', eventId, 'already_replayed');
-      await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'event has already been replayed' });
-    }
-    if (dlq.rows[0].expires_at && new Date(dlq.rows[0].expires_at) <= new Date()) {
-      await audit(operator, 'replay_refused', eventId, 'expired');
-      await client.query('ROLLBACK');
-      return res.status(422).json({ error: 'expired message cannot be replayed' });
-    }
-    const cap = await client.query("SELECT count(*)::int AS n FROM ops_audit WHERE action='replay_approved' AND at >= now()-interval '24 hours'");
-    if (cap.rows[0].n >= replayDailyCap) {
-      await audit(operator, 'replay_refused', eventId, 'daily_cap');
-      await client.query('ROLLBACK');
-      return res.status(429).json({ error: 'daily replay cap reached' });
-    }
+class ReplayRefusal extends Error {
+  constructor(status, message, reason) { super(message); this.status = status; this.reason = reason; }
+}
 
-    // Lane 2 owns execution. This audit/proposal table is a durable approval
-    // intent and can be consumed by a worker to start the exact replay workflow.
-    await client.query(`
-      INSERT INTO replay_requests (event_id, operator, status, reason, prompt_version)
-      VALUES ($1,$2,'approved','operator-approved',$3)
-      ON CONFLICT (event_id) DO NOTHING`, [eventId, operator, promptVersion]);
-    const replayIntent = await client.query('SELECT event_id FROM replay_requests WHERE event_id=$1 AND operator=$2', [eventId, operator]);
-    if (!replayIntent.rows[0]) {
-      await audit(operator, 'replay_refused', eventId, 'approval_already_exists');
-      await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'a replay has already been approved or started' });
-    }
-    await audit(operator, 'replay_approved', eventId, 'operator_approval_written');
+// Both direct operator replay and proposal approval use this same transaction.
+async function queueReplay(client, eventId, operator, version) {
+  // Serialize approvals across instances so concurrent requests cannot exceed the cap.
+  await client.query("SELECT pg_advisory_xact_lock(hashtextextended('console-replay-approvals',0))");
+  const result = await client.query(`SELECT dl.replayed_at, d.state,
+    COALESCE(d.expires_at<=clock_timestamp(),false) AS expired
+    FROM dead_letters dl JOIN deliveries d USING(event_id)
+    WHERE dl.event_id=$1 FOR UPDATE OF dl,d`, [eventId]);
+  const row = result.rows[0];
+  if (!row) throw new ReplayRefusal(404, 'dead-letter item not found', 'not_found');
+  if (row.replayed_at) throw new ReplayRefusal(409, 'event has already been replayed', 'already_replayed');
+  if (row.expired) throw new ReplayRefusal(422, 'expired message cannot be replayed', 'expired');
+  if (row.state !== 'dead_lettered') throw new ReplayRefusal(422, 'event is not in the DLQ', 'not_in_dlq');
+  const previous = await client.query('SELECT event_id FROM replay_requests WHERE event_id=$1', [eventId]);
+  if (previous.rows[0]) throw new ReplayRefusal(409, 'a replay has already been approved or started', 'approval_already_exists');
+  const cap = await client.query("SELECT count(*)::int AS n FROM replay_requests WHERE created_at>=now()-interval '24 hours'");
+  if (cap.rows[0].n >= replayDailyCap) throw new ReplayRefusal(429, 'daily replay cap reached', 'daily_cap');
+  await client.query(`INSERT INTO replay_requests(event_id,operator,status,reason,prompt_version)
+    VALUES($1,$2,'approved','operator-approved',$3)`, [eventId, operator, version]);
+  await client.query(`INSERT INTO ops_audit(operator,action,target,result)
+    VALUES($1,'replay_approved',$2,'operator_approval_written')`, [operator,eventId]);
+}
+
+app.post('/api/dlq/:eventId/replay', mutationsDisabledInPublicDemo, authorized, async (req, res, next) => {
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await queueReplay(client, req.params.eventId, operatorName(req), promptVersion);
     await client.query('COMMIT');
-    res.status(202).json({ event_id: eventId, status: 'approved', reused_idempotency_key: true });
+    res.status(202).json({ event_id: req.params.eventId, status: 'approved', reused_idempotency_key: true });
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => {});
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    if (error instanceof ReplayRefusal) {
+      await client.query(`INSERT INTO ops_audit(operator,action,target,result)
+        VALUES($1,'replay_refused',$2,$3)`, [operatorName(req),req.params.eventId,error.reason]).catch(() => {});
+      return res.status(error.status).json({ error: error.message });
+    }
     next(error);
-  } finally { client.release(); }
+  } finally { client?.release(); }
 });
 
 app.get('/api/controls', authorized, async (_req, res, next) => {
@@ -257,8 +253,12 @@ app.get('/api/metrics', authorized, async (_req, res, next) => {
 app.get('/api/agent/proposals', authorized, async (_req, res, next) => {
   try {
     const result = await pool.query(`
-      SELECT id, event_id::text, action, rationale, risk, prompt_version, model, input_tokens, output_tokens, source, cost_usd, usage_uncertain, approved, approved_by, created_at
-      FROM agent_proposals ORDER BY created_at DESC LIMIT 100`);
+      SELECT p.id, p.event_id::text, p.action, p.rationale, p.risk, p.prompt_version, p.model,
+             p.input_tokens, p.output_tokens, p.source, p.cost_usd, p.usage_uncertain,
+             p.approved, p.approved_by, p.created_at, rr.status AS replay_status,
+             rr.reason AS replay_reason, rr.workflow_id AS replay_workflow_id
+      FROM agent_proposals p LEFT JOIN replay_requests rr ON rr.event_id=p.event_id
+      ORDER BY p.created_at DESC LIMIT 100`);
     res.json({ items: result.rows });
   } catch (error) { next(error); }
 });
@@ -300,15 +300,26 @@ app.post('/api/agent/evaluate/:eventId', mutationsDisabledInPublicDemo, authoriz
 app.post('/api/agent/proposals/:id/approve', mutationsDisabledInPublicDemo, authorized, async (req, res, next) => {
   const operator = operatorName(req);
   const id = Number(req.params.id);
+  let client;
   try {
-    const result = await pool.query(`
-      UPDATE agent_proposals SET approved=true, approved_by=$2
-      WHERE id=$1 AND approved IS NULL
-      RETURNING id, event_id::text, action, rationale, prompt_version`, [id, operator]);
-    if (!result.rows[0]) return res.status(409).json({ error: 'proposal missing or already decided' });
-    await audit(operator, 'agent_proposal_approved', result.rows[0].event_id, result.rows[0].action);
-    res.json(result.rows[0]);
-  } catch (error) { next(error); }
+    client = await pool.connect();
+    await client.query('BEGIN');
+    const found = await client.query(`SELECT id,event_id::text,action,prompt_version FROM agent_proposals
+      WHERE id=$1 AND approved IS NULL FOR UPDATE`, [id]);
+    const proposal = found.rows[0];
+    if (!proposal) throw new ReplayRefusal(409, 'proposal missing or already decided', 'already_decided');
+    if (proposal.action === 'replay') await queueReplay(client, proposal.event_id, operator, proposal.prompt_version);
+    const result = await client.query(`UPDATE agent_proposals SET approved=true,approved_by=$2
+      WHERE id=$1 RETURNING id,event_id::text,action,rationale,prompt_version`, [id,operator]);
+    await client.query(`INSERT INTO ops_audit(operator,action,target,result)
+      VALUES($1,'agent_proposal_approved',$2,$3)`, [operator,proposal.event_id,proposal.action]);
+    await client.query('COMMIT');
+    res.json({ ...result.rows[0], replay_status: proposal.action === 'replay' ? 'approved' : null });
+  } catch (error) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    if (error instanceof ReplayRefusal) return res.status(error.status).json({ error: error.message });
+    next(error);
+  } finally { client?.release(); }
 });
 
 const dist = path.join(__dirname, 'dist');

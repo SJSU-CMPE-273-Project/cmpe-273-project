@@ -15,7 +15,7 @@
 ## Run locally
 
 ```bash
-POSTGRES_HOST_PORT=5434 docker compose up -d --build postgres ops-console demo-trigger
+POSTGRES_HOST_PORT=5434 docker compose up -d --build postgres delivery-worker ops-console demo-trigger
 ```
 
 Open `http://localhost:18084`. The push/email adapter uses port `18083`;
@@ -47,7 +47,7 @@ automatically. Do not expose app or broker ports in the droplet firewall.
 
 ## Replay contract
 
-Replay is intentionally approval-only until Lane 2 consumes `replay_requests`:
+Human-confirmed replay is queued in `replay_requests` and consumed by the delivery worker:
 
 - The event must exist in `dead_letters`.
 - Already replayed events are refused.
@@ -56,8 +56,18 @@ Replay is intentionally approval-only until Lane 2 consumes `replay_requests`:
 - The replay request retains the original `event_id` as the idempotency key.
 - Approval and refusal are recorded in `ops_audit`.
 
-Lane 2 is responsible for executing an approved row and must set `replayed_at` and
-`replayed_by` only after a workflow has started successfully.
+The worker polls committed approvals once per second, locks a request with
+`FOR UPDATE SKIP LOCKED`, and calls Issue B's `StartReplay()`. It records
+`started` plus `workflow_id` and `started_at` after Temporal accepts the workflow.
+`started` means submitted, not delivered; the timeline's delivery state shows the
+outcome. Invalid or expired requests become `refused` with a safe reason. Temporary
+failures remain `approved` and retry after a bounded attempt and backoff.
+
+If Temporal accepts the replay but the database update fails, the next dispatch
+reconciles `delivery-replay/<event_id>` before checking current TTL or ledger state.
+A concurrent manual submission is also reconciled. The fixed workflow ID prevents
+another replay run. Dispatch state and its reason appear on DLQ rows and proposals.
+No Docker socket, subprocess, or provider-send permission is given to the console.
 
 ## API
 
@@ -103,11 +113,12 @@ estimated cost and whether usage is uncertain. Fallbacks never approve a replay.
 
 `GET /api/agent/usage` shows today's UTC input/output tokens, estimated cost,
 budget consumed/reserved and configured daily limit. The UI shows these totals
-and each proposal's provenance. A replay proposal's Approve button records human
-approval then opens the existing explicit replay confirmation. That confirmation
-uses `/api/dlq/:eventId/replay`, the Issue B boundary. This branch still records
-`replay_requests` intents; executing them belongs to Issue B. The agent never
-calls the replay endpoint or a delivery provider.
+and each proposal's provenance. A replay proposal's Approve button asks for human
+confirmation before making any change. The approval endpoint atomically marks the
+proposal approved, enqueues the replay with the proposal's original prompt version,
+and writes audit records. Cancelling confirmation leaves it undecided. Expiry and
+24-hour replay limits use the same transaction helper as direct operator replay.
+The agent never calls approval, replay, or a delivery provider.
 
 ## Configuration and existing databases
 
@@ -150,7 +161,9 @@ For an existing database, apply these additive migrations without deleting data:
 ```bash
 docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < infra/postgres/init/005_ops_console.sql
 docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < infra/postgres/init/006_agent_harness.sql
-docker compose up -d --build ops-console
+docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < infra/postgres/init/005_delivery_replay.sql
+docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < infra/postgres/init/007_replay_dispatch.sql
+docker compose up -d --build delivery-worker ops-console
 ```
 
 The budget is shared by all console instances. Before any model call, PostgreSQL
@@ -185,8 +198,8 @@ The live job fails if the secret is missing; it cannot report a false pass.
 For local database integration tests, create a fresh disposable database named
 `relayguard_agent_test` and set `AGENT_TEST_DATABASE_URL` when running `npm test`.
 The test applies migrations, verifies concurrent reservations, exercises proposal
-creation/listing/usage, and verifies no replay intent exists until an explicit
-human replay request. Without the URL this integration test is skipped.
+creation/listing/usage, and verifies no replay intent exists until human approval, then checks atomic
+queueing, duplicate refusal, expiry, prompt provenance, and concurrent caps. Without the URL this integration test is skipped.
 
 The [passing v2 live run](../../agent/evals/results/dlq-v2-gemini-2026-11-27.json)
 measured 2,120 input and 112 output tokens across four fixtures: 558 total tokens
