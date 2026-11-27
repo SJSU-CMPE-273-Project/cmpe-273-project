@@ -3,8 +3,8 @@
 up:            ## start the core platform
 	docker compose up -d
 
-up-obs:        ## start platform + Jaeger tracing
-	docker compose --profile obs up -d
+up-obs:        ## start platform + Jaeger tracing (services send traces to Jaeger)
+	OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318 docker compose --profile obs up -d
 
 down:          ## stop (keeps data)
 	docker compose --profile obs down
