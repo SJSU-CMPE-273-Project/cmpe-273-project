@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# T3: replay the last 1,000 events (same event_ids). Pass: 0 duplicate sends.
+# T3: replay the last 1,000 events (same event_ids). Pass: 0 duplicate sends, 0 lost.
+# Latency is reported, not graded.
 #
 # This is what the ingest bridge's at-least-once boundary can do in real life:
 # the same record lands in Kafka twice. The worker must skip what it already delivered.
@@ -28,4 +29,5 @@ say "replaying the last $COUNT, same event_ids"
 loadgen replay --target "$TARGET" --from /runs/t3.jsonl --last "$COUNT" >/dev/null || fails=1
 sleep "${SETTLE_SECONDS:-$([[ $TARGET != adapter ]] && echo 30 || echo 2)}"
 echo "provider calls: $(oq calls)"
-finish $fails
+# Graded on dedup, not speed: a 1,000-event burst can't meet the 2 s normal-load SLO (T0's job).
+FINISH_IGNORE=latency finish $fails
