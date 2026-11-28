@@ -35,21 +35,35 @@ function summary(row, attempts, now = new Date()) {
   const providers = ['sms_primary', 'sms_secondary', 'push', 'email', 'sms-primary', 'sms-secondary', 'push-email', 'primary', 'secondary', 'oracle'];
   const codes = ['accepted', 'provider_recovered', 'activity_error', 'interrupted_or_pending',
     'expired', 'ambiguous', 'invalid_request', 'rate_limited', 'unavailable', 'rejected', '', 'permanent_rejection', 'transient_error', 'timeout', 'circuit_open', 'bulkhead_full'];
+  const history = attempts.slice(-20).map(a => ({
+    provider: providers.includes(a.provider) ? a.provider : 'other',
+    code: codes.includes(a.code ?? a.error) || /^[1-5][0-9]{2}$/.test(a.code ?? a.error ?? '') ? String(a.code ?? a.error) : 'unknown',
+    time: Number.isFinite(new Date(a.at).getTime()) ? new Date(a.at).toISOString() : null,
+  }));
+  let reason = reasons.includes(row.reason) ? row.reason : 'unknown';
+  // The worker records channels_exhausted for any message that ran out of channels.
+  // When every attempt was a permanent rejection (e.g. T5's poison: rejected on SMS
+  // primary, SMS secondary and push), say so, so the model and the rules see a
+  // rejection rather than an unclear failure. Mixed or transient failures stay as is.
+  if (reason === 'channels_exhausted' && history.length > 0 && history.every(a => isRejection(a.code))) {
+    reason = 'provider_rejection';
+  }
   return { priority: [0, 1, 2, 3].includes(row.priority) ? row.priority : 0,
-    reason: reasons.includes(row.reason) ? row.reason : 'unknown',
-    expired: Boolean(row.expires_at && new Date(row.expires_at) <= now),
-    attempts: attempts.slice(-20).map(a => ({
-      provider: providers.includes(a.provider) ? a.provider : 'other',
-      code: codes.includes(a.code ?? a.error) || /^[1-5][0-9]{2}$/.test(a.code ?? a.error ?? '') ? String(a.code ?? a.error) : 'unknown',
-      time: Number.isFinite(new Date(a.at).getTime()) ? new Date(a.at).toISOString() : null,
-    })) };
+    reason, expired: Boolean(row.expires_at && new Date(row.expires_at) <= now), attempts: history };
+}
+function isRejection(code) {
+  return ['rejected', 'permanent_rejection', 'invalid_request'].includes(code) || (/^4[0-9]{2}$/.test(code) && !['408', '429'].includes(code));
 }
 function fallback(data, source) {
   let action = 'escalate';
   let rationale = 'The failure is unclear; keep it in the DLQ for operator review.';
+  // Same order as the dlq-v2 prompt: expired → discard; confirmed fix → replay;
+  // a rejection without a confirmed fix stays escalated until a human confirms the fix.
   if (data.expired) { action = 'discard'; rationale = 'The message has expired and must not be delivered late.'; }
-  else if (/reject|poison/.test(data.reason)) {
-    action = 'replay'; rationale = 'Provider rejection; replay only after the provider is fixed and a human approves.';
+  else if (/_after_fix$/.test(data.reason)) {
+    action = 'replay'; rationale = 'Provider rejection was fixed; replay once with human approval.';
+  } else if (/reject|poison/.test(data.reason)) {
+    rationale = 'Every channel rejected this message. Fix the cause, then replay it once with human approval.';
   } else if (/provider|outage/.test(data.reason)) rationale = 'Verify provider recovery before replay.';
   return { action, rationale, risk: action === 'discard' ? 'low' : 'high', source };
 }

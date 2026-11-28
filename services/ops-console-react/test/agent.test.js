@@ -175,3 +175,22 @@ test('v2 is active by default and v1 remains available for comparison', () => {
     assert.equal(body.messages[0].content, candidate.prompt);
   }
 });
+
+test('real T5 poison row: all-rejected channels_exhausted is sent as provider_rejection', async () => {
+  const t5 = cases.find(item => item.name.startsWith('T5 poison'));
+  assert.equal(agent.summary(t5.row, t5.attempts).reason, 'provider_rejection');
+  // Seen live: when the last channel is email, it answers invalid_request (also permanent).
+  const viaEmail = [...t5.attempts.slice(0, 2), { provider: 'email', error: 'invalid_request', at: t5.attempts[2].at }];
+  assert.equal(agent.summary(t5.row, viaEmail).reason, 'provider_rejection');
+  // Mixed or transient failures keep the worker's reason.
+  const mixed = [...t5.attempts.slice(0, 2), { provider: 'push', error: '503', at: t5.attempts[2].at }];
+  assert.equal(agent.summary(t5.row, mixed).reason, 'channels_exhausted');
+  assert.equal(agent.summary(t5.row, [{ provider: 'sms_primary', error: '429', at: t5.attempts[0].at }]).reason, 'channels_exhausted');
+  assert.equal(agent.summary(t5.row, []).reason, 'channels_exhausted');
+  // Rules agree with dlq-v2: a rejection without a confirmed fix is escalated, a confirmed fix is replayed.
+  const noKey = await agent.evaluate(t5.row, t5.attempts, { ...c, key: '' }, accounting());
+  assert.equal(noKey.action, 'escalate');
+  assert.match(noKey.rationale, /Fix the cause, then replay/);
+  const fixed = await agent.evaluate(cases[1].row, cases[1].attempts, { ...c, key: '' }, accounting());
+  assert.equal(fixed.action, 'replay');
+});
