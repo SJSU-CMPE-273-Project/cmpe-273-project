@@ -163,6 +163,7 @@ docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USE
 docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < infra/postgres/init/006_agent_harness.sql
 docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < infra/postgres/init/005_delivery_replay.sql
 docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < infra/postgres/init/007_replay_dispatch.sql
+docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < infra/postgres/init/008_dlq_discard.sql
 docker compose up -d --build delivery-worker ops-console
 ```
 
@@ -248,7 +249,14 @@ alone. Share only `model_error` and model names when requesting help.
 
 ## Security
 
-- Operator authentication uses the existing `OPERATOR_TOKEN` Bearer check.
+- Operator authentication uses the existing `OPERATOR_TOKEN` Bearer check (constant-time compare).
+- With no `OPERATOR_TOKEN` and `PUBLIC_DEMO` off, write routes accept only loopback or
+  private-network clients with no `X-Forwarded-For`/`Forwarded` header. Local Compose works
+  as before; a public deploy behind a proxy gets `403` until one of the two is set.
+- Approving a `discard` proposal sets `dead_letters.discarded_at`/`discarded_by` (migration
+  008): the item leaves the DLQ list and any later replay is refused with `409`.
+- With both price variables at `0` (Gemini free tier) the console shows "free tier, no charge"
+  instead of a `$0` estimate.
 - Parameterized SQL, a 32 KB JSON limit, and a non-root, read-only container.
 - PII exclusion and closed vocabularies before the model boundary (OWASP LLM02).
 - Untrusted-data system instructions and strict response validation (LLM01/LLM05).

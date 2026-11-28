@@ -98,7 +98,9 @@ func dispatcherFixture(t *testing.T) (*ReplayDispatcher, *pgx.Conn, *pb.Notifica
 	_, err = db.Exec(t.Context(), `INSERT INTO dead_letters(event_id,reason,original) VALUES($1,'poison',$2)`, e.EventId, data)
 	require.NoError(t, err)
 	f := new(dispatchTemporal)
-	return &ReplayDispatcher{DSN: ledger.DSN, Temporal: f}, db, e, f
+	d := &ReplayDispatcher{DSN: ledger.DSN, Temporal: f}
+	t.Cleanup(d.Close)
+	return d, db, e, f
 }
 func approveDispatch(t *testing.T, db *pgx.Conn, id string) {
 	t.Helper()

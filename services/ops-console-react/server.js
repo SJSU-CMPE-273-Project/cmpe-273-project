@@ -5,6 +5,7 @@ const http = require('node:http');
 const { Pool } = require('pg');
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const agent = require('./agent');
 const agentConfig = agent.config();
 
@@ -36,11 +37,31 @@ function audit(operator, action, target, result) {
   );
 }
 
+function tokenMatches(given) {
+  const a = crypto.createHash('sha256').update(given).digest();
+  const b = crypto.createHash('sha256').update(operatorToken).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
 function authorized(req, res, next) {
   if (!operatorToken) return next();
   const given = String(req.headers.authorization || '').replace(/^Bearer /i, '');
-  if (given !== operatorToken) return res.status(401).json({ error: 'unauthorized' });
+  if (!tokenMatches(given)) return res.status(401).json({ error: 'unauthorized' });
   next();
+}
+
+// With no OPERATOR_TOKEN and PUBLIC_DEMO off, the console is open. Allow writes in
+// that mode only from this machine or a private (Docker) network, never through a
+// reverse proxy, so an accidental public deploy cannot replay or flip kill switches.
+function localAddress(address = '') {
+  const ip = address.replace(/^::ffff:/, '');
+  return ip === '::1' || /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)/.test(ip) || /^f[cd]/i.test(ip);
+}
+
+function openModeWritesLocalOnly(req, res, next) {
+  if (operatorToken) return next();
+  if (localAddress(req.socket.remoteAddress) && !req.headers['x-forwarded-for'] && !req.headers.forwarded) return next();
+  return res.status(403).json({ error: 'set OPERATOR_TOKEN or PUBLIC_DEMO=true before exposing operator actions' });
 }
 
 function mutationsDisabledInPublicDemo(_req, res, next) {
@@ -129,6 +150,7 @@ app.get('/api/dlq', authorized, async (_req, res, next) => {
       FROM dead_letters dl
       JOIN deliveries d ON d.event_id=dl.event_id
       LEFT JOIN replay_requests rr ON rr.event_id=dl.event_id
+      WHERE dl.discarded_at IS NULL
       ORDER BY dl.dead_lettered_at DESC LIMIT 500`);
     const rows = await Promise.all(result.rows.map(async row => {
       const attempts = await pool.query(`
@@ -148,13 +170,14 @@ class ReplayRefusal extends Error {
 async function queueReplay(client, eventId, operator, version) {
   // Serialize approvals across instances so concurrent requests cannot exceed the cap.
   await client.query("SELECT pg_advisory_xact_lock(hashtextextended('console-replay-approvals',0))");
-  const result = await client.query(`SELECT dl.replayed_at, d.state,
+  const result = await client.query(`SELECT dl.replayed_at, dl.discarded_at, d.state,
     COALESCE(d.expires_at<=clock_timestamp(),false) AS expired
     FROM dead_letters dl JOIN deliveries d USING(event_id)
     WHERE dl.event_id=$1 FOR UPDATE OF dl,d`, [eventId]);
   const row = result.rows[0];
   if (!row) throw new ReplayRefusal(404, 'dead-letter item not found', 'not_found');
   if (row.replayed_at) throw new ReplayRefusal(409, 'event has already been replayed', 'already_replayed');
+  if (row.discarded_at) throw new ReplayRefusal(409, 'event was discarded', 'discarded');
   if (row.expired) throw new ReplayRefusal(422, 'expired message cannot be replayed', 'expired');
   if (row.state !== 'dead_lettered') throw new ReplayRefusal(422, 'event is not in the DLQ', 'not_in_dlq');
   const previous = await client.query('SELECT event_id FROM replay_requests WHERE event_id=$1', [eventId]);
@@ -167,7 +190,22 @@ async function queueReplay(client, eventId, operator, version) {
     VALUES($1,'replay_approved',$2,'operator_approval_written')`, [operator,eventId]);
 }
 
-app.post('/api/dlq/:eventId/replay', mutationsDisabledInPublicDemo, authorized, async (req, res, next) => {
+// An approved discard closes the DLQ item: it leaves the list and can never be replayed.
+async function discard(client, eventId, operator) {
+  const result = await client.query(`SELECT replayed_at, discarded_at
+    FROM dead_letters WHERE event_id=$1 FOR UPDATE`, [eventId]);
+  const row = result.rows[0];
+  if (!row) throw new ReplayRefusal(404, 'dead-letter item not found', 'not_found');
+  if (row.discarded_at) throw new ReplayRefusal(409, 'event was already discarded', 'already_discarded');
+  if (row.replayed_at) throw new ReplayRefusal(409, 'event has already been replayed', 'already_replayed');
+  const previous = await client.query('SELECT event_id FROM replay_requests WHERE event_id=$1', [eventId]);
+  if (previous.rows[0]) throw new ReplayRefusal(409, 'a replay has already been approved or started', 'approval_already_exists');
+  await client.query('UPDATE dead_letters SET discarded_at=now(), discarded_by=$2 WHERE event_id=$1', [eventId, operator]);
+  await client.query(`INSERT INTO ops_audit(operator,action,target,result)
+    VALUES($1,'dlq_discarded',$2,'operator_approval_written')`, [operator, eventId]);
+}
+
+app.post('/api/dlq/:eventId/replay', mutationsDisabledInPublicDemo, openModeWritesLocalOnly, authorized, async (req, res, next) => {
   let client;
   try {
     client = await pool.connect();
@@ -196,7 +234,7 @@ app.get('/api/controls', authorized, async (_req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.put('/api/controls/producers/:producer', mutationsDisabledInPublicDemo, authorized, async (req, res, next) => {
+app.put('/api/controls/producers/:producer', mutationsDisabledInPublicDemo, openModeWritesLocalOnly, authorized, async (req, res, next) => {
   const operator = operatorName(req);
   const producer = req.params.producer;
   const enabled = typeof req.body.enabled === 'boolean' ? req.body.enabled : null;
@@ -214,7 +252,7 @@ app.put('/api/controls/producers/:producer', mutationsDisabledInPublicDemo, auth
   } catch (error) { next(error); }
 });
 
-app.put('/api/controls/guardrails/:key', mutationsDisabledInPublicDemo, authorized, async (req, res, next) => {
+app.put('/api/controls/guardrails/:key', mutationsDisabledInPublicDemo, openModeWritesLocalOnly, authorized, async (req, res, next) => {
   const operator = operatorName(req);
   const key = req.params.key;
   const value = String(req.body.value ?? '').trim();
@@ -268,11 +306,12 @@ app.get('/api/agent/usage', authorized, async (_req, res, next) => {
     const result = await pool.query(`SELECT day, input_tokens, output_tokens, budget_tokens, cost_usd
       FROM agent_daily_usage WHERE day=(now() AT TIME ZONE 'UTC')::date`);
     res.json({ day: new Date().toISOString().slice(0, 10), input_tokens: 0, output_tokens: 0,
-      budget_tokens: 0, cost_usd: 0, ...result.rows[0], daily_budget: agentConfig.budget });
+      budget_tokens: 0, cost_usd: 0, ...result.rows[0], daily_budget: agentConfig.budget,
+      priced: agentConfig.inputRate > 0 || agentConfig.outputRate > 0 });
   } catch (error) { next(error); }
 });
 
-app.post('/api/agent/evaluate/:eventId', mutationsDisabledInPublicDemo, authorized, async (req, res, next) => {
+app.post('/api/agent/evaluate/:eventId', mutationsDisabledInPublicDemo, openModeWritesLocalOnly, authorized, async (req, res, next) => {
   const eventId = req.params.eventId;
   try {
     const dlq = await pool.query(`
@@ -297,7 +336,7 @@ app.post('/api/agent/evaluate/:eventId', mutationsDisabledInPublicDemo, authoriz
   } catch (error) { next(error); }
 });
 
-app.post('/api/agent/proposals/:id/approve', mutationsDisabledInPublicDemo, authorized, async (req, res, next) => {
+app.post('/api/agent/proposals/:id/approve', mutationsDisabledInPublicDemo, openModeWritesLocalOnly, authorized, async (req, res, next) => {
   const operator = operatorName(req);
   const id = Number(req.params.id);
   let client;
@@ -309,12 +348,14 @@ app.post('/api/agent/proposals/:id/approve', mutationsDisabledInPublicDemo, auth
     const proposal = found.rows[0];
     if (!proposal) throw new ReplayRefusal(409, 'proposal missing or already decided', 'already_decided');
     if (proposal.action === 'replay') await queueReplay(client, proposal.event_id, operator, proposal.prompt_version);
+    if (proposal.action === 'discard') await discard(client, proposal.event_id, operator);
     const result = await client.query(`UPDATE agent_proposals SET approved=true,approved_by=$2
       WHERE id=$1 RETURNING id,event_id::text,action,rationale,prompt_version`, [id,operator]);
     await client.query(`INSERT INTO ops_audit(operator,action,target,result)
       VALUES($1,'agent_proposal_approved',$2,$3)`, [operator,proposal.event_id,proposal.action]);
     await client.query('COMMIT');
-    res.json({ ...result.rows[0], replay_status: proposal.action === 'replay' ? 'approved' : null });
+    res.json({ ...result.rows[0], replay_status: proposal.action === 'replay' ? 'approved' : null,
+      discarded: proposal.action === 'discard' });
   } catch (error) {
     if (client) await client.query('ROLLBACK').catch(() => {});
     if (error instanceof ReplayRefusal) return res.status(error.status).json({ error: error.message });

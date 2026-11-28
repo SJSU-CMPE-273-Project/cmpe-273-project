@@ -5,12 +5,14 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SJSU-CMPE-273-Project/cmpe-273-project/contracts"
 	pb "github.com/SJSU-CMPE-273-Project/cmpe-273-project/gen/go/relayguard/v1"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/api/workflowservice/v1"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -25,12 +27,48 @@ type ReplayDispatchClient interface {
 type ReplayDispatcher struct {
 	DSN      string
 	Temporal ReplayDispatchClient
+
+	mu   sync.Mutex
+	pool *pgxpool.Pool
+}
+
+// db returns one long-lived pool, created on first use, so the one-second poll
+// reuses a connection instead of opening a new one each time. If Postgres is down
+// the pool is not cached and the next poll tries again.
+func (d *ReplayDispatcher) db(ctx context.Context) (*pgxpool.Pool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.pool != nil {
+		return d.pool, nil
+	}
+	cfg, err := pgxpool.ParseConfig(d.DSN)
+	if err != nil {
+		return nil, err
+	}
+	cfg.MaxConns = 2
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	d.pool = pool
+	return pool, nil
+}
+
+// Close releases the pool. Run calls it on shutdown; tests call it in cleanup.
+func (d *ReplayDispatcher) Close() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.pool != nil {
+		d.pool.Close()
+		d.pool = nil
+	}
 }
 
 // Run polls only committed human approvals. Transient failures leave the request
 // approved. A bounded attempt and one-second backoff prevent a dependency outage
 // from blocking Kafka delivery or spinning on a failed request.
 func (d *ReplayDispatcher) Run(ctx context.Context) {
+	defer d.Close()
 	for ctx.Err() == nil {
 		attemptCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		processed, err := d.DispatchOne(attemptCtx)
@@ -53,12 +91,11 @@ func (d *ReplayDispatcher) Run(ctx context.Context) {
 // A rollback/crash leaves it retryable; the stable workflow ID closes the gap
 // between acceptance by Temporal and committing status=started in PostgreSQL.
 func (d *ReplayDispatcher) DispatchOne(ctx context.Context) (bool, error) {
-	c, err := pgx.Connect(ctx, d.DSN)
+	pool, err := d.db(ctx)
 	if err != nil {
 		return false, err
 	}
-	defer c.Close(context.Background())
-	tx, err := c.Begin(ctx)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return false, err
 	}

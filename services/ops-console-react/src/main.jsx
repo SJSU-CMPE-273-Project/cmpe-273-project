@@ -159,7 +159,7 @@ function App() {
     </section>
 
     {!publicDemo && <section className="panel proposals-panel">
-      <div className="panel-head"><div><p>Human in the loop</p><h2>Agent proposals</h2><span>Today (UTC): {Number(usage.input_tokens || 0) + Number(usage.output_tokens || 0)} tokens · ${Number(usage.cost_usd || 0).toFixed(6)} estimated · budget {usage.budget_tokens || 0}/{usage.daily_budget || 0} (includes reservations)</span></div></div>
+      <div className="panel-head"><div><p>Human in the loop</p><h2>Agent proposals</h2><span>Today (UTC): {Number(usage.input_tokens || 0) + Number(usage.output_tokens || 0)} tokens · {usage.priced === false ? "free tier, no charge" : `$${Number(usage.cost_usd || 0).toFixed(6)} estimated`} · budget {usage.budget_tokens || 0}/{usage.daily_budget || 0} (includes reservations)</span></div></div>
       {!proposals.length ? <div className="empty">No proposals</div> : proposals.map(p => <div className="proposal" key={p.id}>
         <div><span className={`action ${p.action}`}>{p.action}</span><code>{p.event_id?.slice(0, 8)}</code><small>Prompt {p.prompt_version} · {p.model} · {p.input_tokens} in / {p.output_tokens} out · {p.source}{p.usage_uncertain ? " · usage unknown; cost upper bound" : ""}</small></div>
         <p>{p.rationale}<small>Risk: {p.risk}</small>{p.replay_status && <small>Replay {p.replay_status}: {p.replay_reason}<br />{p.replay_workflow_id}</small>}</p>

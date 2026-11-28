@@ -21,7 +21,7 @@ test('PostgreSQL migrations, concurrent budget, evaluate API and approval bounda
   let server;
   try {
     for (const file of ['001_schema.sql', '002_sequence_range.sql', '003_ingest_recovery.sql',
-      '004_ingest_rejection_identity.sql', '005_delivery_replay.sql', '005_ops_console.sql', '006_agent_harness.sql', '007_replay_dispatch.sql']) {
+      '004_ingest_rejection_identity.sql', '005_delivery_replay.sql', '005_ops_console.sql', '006_agent_harness.sql', '007_replay_dispatch.sql', '008_dlq_discard.sql']) {
       await pool.query(fs.readFileSync(path.join(__dirname, '../../../infra/postgres/init', file), 'utf8'));
     }
     // Upgrade is idempotent on existing Lane 4 databases.
@@ -91,6 +91,20 @@ test('PostgreSQL migrations, concurrent budget, evaluate API and approval bounda
     const escalation = (await pool.query(`INSERT INTO agent_proposals(event_id,action,rationale,prompt_version)
       VALUES($1,'escalate','test','dlq-v2') RETURNING id`, [expired])).rows[0];
     assert.equal((await nativeFetch(`${base}/api/agent/proposals/${escalation.id}/approve`, { method: 'POST' })).status, 200);
+    assert.equal((await pool.query('SELECT count(*)::int AS n FROM replay_requests')).rows[0].n, 1);
+    // An approved discard removes the item from the DLQ list and blocks any later replay.
+    const doomed = '00000000-0000-4000-8000-000000000024';
+    await seed(doomed);
+    const discardProposal = (await pool.query(`INSERT INTO agent_proposals(event_id,action,rationale,prompt_version)
+      VALUES($1,'discard','test','dlq-v2') RETURNING id`, [doomed])).rows[0];
+    const discarded = await nativeFetch(`${base}/api/agent/proposals/${discardProposal.id}/approve`, { method: 'POST' });
+    assert.equal(discarded.status, 200);
+    assert.equal((await discarded.json()).discarded, true);
+    assert.ok((await pool.query('SELECT discarded_at FROM dead_letters WHERE event_id=$1', [doomed])).rows[0].discarded_at);
+    const dlq = await (await nativeFetch(`${base}/api/dlq`)).json();
+    assert.ok(!dlq.items.some(item => item.event_id === doomed));
+    assert.equal((await nativeFetch(`${base}/api/dlq/${doomed}/replay`, { method: 'POST' })).status, 409);
+    assert.equal((await pool.query("SELECT count(*)::int AS n FROM ops_audit WHERE action='dlq_discarded'")).rows[0].n, 1);
     assert.equal((await pool.query('SELECT count(*)::int AS n FROM replay_requests')).rows[0].n, 1);
     // Three concurrent approvals compete for the one remaining daily allowance.
     const ids = ['00000000-0000-4000-8000-000000000021', '00000000-0000-4000-8000-000000000022', '00000000-0000-4000-8000-000000000023'];
