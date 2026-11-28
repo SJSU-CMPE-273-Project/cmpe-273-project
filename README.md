@@ -376,6 +376,7 @@ flowchart LR
 - **Tools (read-only by default):** read DLQ items, read attempt history, read provider and circuit-breaker status. The only write tool is `propose_action`; it does not replay anything itself.
 - **Prompts:** system and task prompts are stored in `agent/prompts/` and versioned with the code. Each proposal records the prompt version that produced it.
 - **Guardrails on the agent:** max replays per run, no replay of expired messages, rate limits still apply, PII masked before anything reaches the model, and every proposal requires human approval.
+- **Human-approved replay:** approval and replay queueing commit together. The delivery worker consumes only approved requests and calls Issue B's existing replay workflow. Stable workflow IDs and database row locks make retries after crashes safe; the console shows dispatch status separately from delivery outcome.
 - **Evaluation:** a fixed set of DLQ scenarios (expired OTP, poison message, provider outage) with expected actions, run on every prompt change.
 
 ### Security and OWASP
@@ -394,7 +395,7 @@ flowchart LR
 
 | Risk | Control |
 |---|---|
-| Prompt injection (message content tries to instruct the agent) | Message bodies are passed as data, never as instructions; the agent cannot act without human approval |
+| Prompt injection (message content tries to instruct the agent) | Message bodies are excluded entirely; reason, provider and error code use closed vocabularies; the agent cannot act without human approval |
 | Sensitive information disclosure | PII masked before it reaches the model |
 | Excessive agency | Read-only tools; one `propose_action` tool; human approval; replay cap |
 
@@ -402,26 +403,58 @@ flowchart LR
 
 The ops agent is the only part of RelayGuard that uses an LLM, so token cost scales with DLQ volume, not with total message volume.
 
-| Item | Estimate (to be measured) |
-|---|---|
-| Tokens per DLQ item (input + output) | [__] |
-| Cost per 1,000 DLQ items | [$__] |
-| DLQ items per day at demo load | [__] |
-| Cost per day | [$__] |
+The [passing live Gemini run](agent/evals/results/dlq-v2-gemini-2026-11-27.json)
+on November 27 used the active `dlq-v2` prompt with `gemini-3.5-flash-lite`.
+All four fixed eval cases passed with model responses. These are actual
+provider-reported token counts; the $0 cost uses configured free-tier rates.
+The [v1 baseline](agent/evals/results/dlq-v1-gemini-2026-11-27.json) passed 3/4;
+v2 made expiry precedence explicit to correct that failure.
 
-**Strategies to keep cost down:**
-- Batch similar DLQ items (e.g. all items from one provider outage) into one request
-- Use a small, cheap model for classification and a larger model only for unclear cases
-- Send masked summaries of attempt history, not raw logs
-- Cache results for repeated failure patterns
-- Hard daily token budget; when it is reached, the agent stops and the DLQ is handled manually
+| Item | Live v2 run measurement |
+|---|---|
+| Input / output tokens across four items | 2,120 / 112 |
+| Average tokens per DLQ item (input + output) | 558 (530 input + 28 output) |
+| Cost per 1,000 items at configured free-tier rates | $0 |
+| Items evaluated / passing | 4 / 4 |
+| Estimated cost of this run | $0; actual billing depends on the Google project tier |
+| Default daily token budget | 100,000 tokens |
+
+The reproducible [offline baseline](agent/evals/economics-baseline.json) records
+zero external calls, zero measured tokens and $0 spending; its reservation bounds
+are projections, distinct from the live measurements above. Production daily DLQ
+volume has not been measured.
+
+The default provider is Gemini (`gemini-3.5-flash-lite`), with $0 input/output
+accounting rates for the [Google free tier](https://ai.google.dev/gemini-api/docs/pricing).
+Quotas and model availability depend on the Google project. Configure actual rates
+if billing is enabled; setting a rate to zero here does not disable provider billing.
+Free-tier content may be used to improve Google products; raw bodies and PII remain excluded.
+OpenAI is still selectable with `AGENT_PROVIDER=openai` (default `gpt-4.1-mini`,
+$0.40 input/$1.60 output per million tokens).
+Cost is `(input_tokens × input_rate + output_tokens × output_rate) / 1,000,000`.
+Costs exclude taxes, hosting and non-agent traffic.
+Generate the baseline with `node agent/evals/economics.js`. Run real prompt evals
+with `GEMINI_API_KEY` configured and
+`AGENT_EVAL_REPORT=agent/evals/live-results.json node agent/evals/run.js`.
+The live command writes provider-reported counts and costs and fails on any
+fallback or wrong action. Replace projections with that report after a live run.
+The console shows today's UTC token counts, estimated cost and reserved budget.
+
+Implemented controls: at most 20 allowlisted attempts, no raw bodies or identifiers,
+1,024 Gemini output tokens per request (including reasoning), a 15-second timeout, no automatic model retries,
+and atomic daily budget reservation in PostgreSQL. Unknown usage after an outage
+retains the reservation and shows an upper-bound cost; no-key calls cost zero.
+Budget exhaustion uses the existing deterministic policy and still requires human
+approval. Caching and batching are future optimizations.
 
 ### Deployment
 
-- **Local development:** Docker Compose, the full stack on one machine
-- **Live demo:** a single-node deployment on [AWS / chosen host], publicly accessible
-- **Public surface:** only the Ops Console (and the demo trigger) has a public URL; all other services are internal
-- **Cost:** free or low-cost tier where possible
+- **Primary live demo:** one Ubuntu droplet running k3s; expose only the Ops Console through Traefik and Let's Encrypt HTTPS.
+- **Fallback:** Docker Compose with Caddy on the droplet; Caddy is the only service bound publicly on ports 80/443.
+- **Public console:** no login for the class demo; `PUBLIC_DEMO=true` disables replay, producer-control, and agent-write endpoints. Three bounded buttons refresh the view, run a fixed three-event smoke test, and open the Oracle report.
+- **Worker load sharing:** deploy three delivery-worker replicas in the same Kafka consumer group. Kafka partitions are assigned across group members; the topic needs at least three partitions to keep all three busy.
+- **Deployment steps and current Lane 2 image prerequisite:** see [the k3s deployment runbook](deploy/k3s/README.md).
+- **Cost:** use a low-cost droplet; shut it down after the demo.
 
 ### Course Module Mapping (additions)
 

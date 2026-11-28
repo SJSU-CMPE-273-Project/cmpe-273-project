@@ -52,7 +52,7 @@ If `max_lateness_s` gets large, the generator itself fell behind schedule. Treat
 ## Tests
 ```bash
 docker build --build-context contracts=contracts --target test -t loadgen:test harness/load-generator
-docker run --rm loadgen:test    # 21 tests
+docker run --rm loadgen:test    # includes bounded public demo-trigger tests
 ```
 The tests cover: contract shape, per-account sequences, the Protobuf round trip (no Confluent framing, unknown fields rejected), registering with the oracle before sending, 429 handling, per-account order under concurrency, and retries after a refused connection.
 

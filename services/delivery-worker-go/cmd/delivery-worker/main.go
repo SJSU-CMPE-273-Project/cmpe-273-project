@@ -79,6 +79,11 @@ func run(ctx context.Context) error {
 		return err
 	}
 	defer w.Stop()
+	dispatchCtx, stopDispatch := context.WithCancel(ctx)
+	dispatchDone := make(chan struct{})
+	dispatcher := &delivery.ReplayDispatcher{DSN: ledger.DSN, Temporal: temporalClient}
+	go func() { defer close(dispatchDone); dispatcher.Run(dispatchCtx) }()
+	defer func() { stopDispatch(); <-dispatchDone }()
 	slog.Info("delivery worker ready")
 	handoff := func(ctx context.Context, record *kgo.Record) error {
 		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)

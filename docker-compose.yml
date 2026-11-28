@@ -18,7 +18,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-relayguard}
       POSTGRES_DB: ${POSTGRES_DB:-relayguard}
     ports:
-      - "${POSTGRES_HOST_PORT:-5433}:5432"
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
@@ -43,8 +43,8 @@ services:
       IGGY_QUIC_ENABLED: "false"
       IGGY_WEBSOCKET_ENABLED: "false"
     ports:
-      - "8090:8090"   # TCP (SDKs)
-      - "3000:3000"   # HTTP API
+      - "127.0.0.1:8090:8090"   # TCP (SDKs)
+      - "127.0.0.1:3000:3000"   # HTTP API
     volumes:
       - iggydata:/app/local_data
     # Iggy uses io_uring: needs these and a host kernel >= 5.19.
@@ -93,7 +93,7 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
     ports:
-      - "9094:9094"
+      - "127.0.0.1:9094:9094"
     volumes:
       - kafkadata:/var/lib/kafka/data
     healthcheck:
@@ -162,8 +162,8 @@ services:
       - --namespace=relayguard
       - --db-filename=/data/temporal.db
     ports:
-      - "7233:7233"   # gRPC frontend (SDKs)
-      - "8233:8233"   # Web UI
+      - "127.0.0.1:7233:7233"   # gRPC frontend (SDKs)
+      - "127.0.0.1:8233:8233"   # Web UI
     volumes:
       - temporaldata:/data
 
@@ -212,7 +212,7 @@ services:
     image: ghcr.io/shopify/toxiproxy:${TOXIPROXY_VERSION:-2.9.0}
     command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
     ports:
-      - "8474:8474"   # control API (used by harness/chaos)
+      - "127.0.0.1:8474:8474"   # control API (used by harness/chaos)
     volumes:
       - ./infra/toxiproxy/toxiproxy.json:/config/toxiproxy.json:ro
 
@@ -229,7 +229,7 @@ services:
       FAULT_MODE: ${SMS_PRIMARY_FAULT_MODE:-ok}
       ADMIN_TOKEN: ${ADAPTER_ADMIN_TOKEN:-}
     ports:
-      - "18081:8080"
+      - "127.0.0.1:18081:8080"
     read_only: true          # stateless: nothing is written to disk
     tmpfs: [/tmp]
 
@@ -241,7 +241,7 @@ services:
       FAULT_MODE: ${SMS_SECONDARY_FAULT_MODE:-ok}
       ADMIN_TOKEN: ${ADAPTER_ADMIN_TOKEN:-}
     ports:
-      - "18082:8080"
+      - "127.0.0.1:18082:8080"
 
   # ------------------------------------------- Oracle / fake phone (Lane 3)
   # Plays every provider (SMS, push, email) and grades each run:
@@ -253,7 +253,7 @@ services:
       P99_TARGET_MS: ${ORACLE_P99_TARGET_MS:-2000}
       ADMIN_TOKEN: ${ORACLE_ADMIN_TOKEN:-}
     ports:
-      - "18080:8080"
+      - "127.0.0.1:18080:8080"
     read_only: true
     tmpfs: [/tmp]
 
@@ -286,9 +286,72 @@ services:
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
     ports:
-      - "16686:16686"
-      - "4317:4317"
-      - "4318:4318"
+      - "127.0.0.1:16686:16686"
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+
+  # ---------------------------------------------------- Ops Console (Lane 4)
+  # Public demo surface: read-only data plus approved replay/guardrail actions.
+  # Fixed, bounded smoke-test trigger. It is reachable only inside Compose.
+  demo-trigger:
+    build:
+      context: ./harness/load-generator
+      additional_contexts:
+        contracts: ./contracts
+    entrypoint: ["python", "/app/demo_trigger.py"]
+    depends_on:
+      oracle:
+        condition: service_started
+      sms-adapter-primary:
+        condition: service_started
+      toxiproxy:
+        condition: service_started
+    environment:
+      DEMO_TRIGGER_PORT: "8099"
+      DEMO_TARGET: ${DEMO_TARGET:-adapter}
+      ORACLE_URL: http://oracle:8080
+      ORACLE_ADMIN_TOKEN: ${ORACLE_ADMIN_TOKEN:-}
+      ADAPTER_URL: http://toxiproxy:21001
+    expose:
+      - "8099"
+    read_only: true
+    tmpfs: [/tmp]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8099/status', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  ops-console:
+    build:
+      context: ./services/ops-console-react
+      additional_contexts:
+        prompts: ./agent/prompts
+    depends_on:
+      postgres:
+        condition: service_healthy
+      demo-trigger:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-relayguard}:${POSTGRES_PASSWORD:-relayguard}@postgres:5432/${POSTGRES_DB:-relayguard}
+      OPERATOR_TOKEN: ${OPERATOR_TOKEN:-}
+      REPLAY_DAILY_CAP: ${REPLAY_DAILY_CAP:-20}
+      AGENT_PROMPT_VERSION: ${AGENT_PROMPT_VERSION:-dlq-v2}
+      AGENT_PROVIDER: ${AGENT_PROVIDER:-gemini}
+      AGENT_MODEL: ${AGENT_MODEL:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      AGENT_DAILY_TOKEN_BUDGET: ${AGENT_DAILY_TOKEN_BUDGET:-100000}
+      AGENT_INPUT_USD_PER_MILLION: ${AGENT_INPUT_USD_PER_MILLION:-}
+      AGENT_OUTPUT_USD_PER_MILLION: ${AGENT_OUTPUT_USD_PER_MILLION:-}
+      PUBLIC_DEMO: ${PUBLIC_DEMO:-false}
+      ORACLE_URL: http://oracle:8080
+      DEMO_TRIGGER_URL: http://demo-trigger:8099
+    ports:
+      - "${OPS_CONSOLE_BIND:-127.0.0.1}:${OPS_CONSOLE_HOST_PORT:-18084}:3000"
+    read_only: true
+    tmpfs: [/tmp]
+
 
 volumes:
   pgdata:

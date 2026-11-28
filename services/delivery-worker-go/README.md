@@ -123,6 +123,38 @@ metadata (`replayed_at`, `replayed_by`, `replay_token`) and the original DLQ row
 remain after success. The oracle reads terminal states from `deliveries` and
 uses historical `dead_letters` rows to retain the late-replay ordering exemption.
 
+The Ops Console also submits through this same replay function. Apply
+`005_ops_console.sql` and `007_replay_dispatch.sql` before running the new worker
+on an existing volume. After human confirmation, the console commits an
+`approved` replay request and audit record. A worker dispatcher claims that row
+with `FOR UPDATE SKIP LOCKED`, rechecks the ledger and stored payload, and starts
+`delivery-replay/EVENT_UUID`. `started` records workflow acceptance, not delivery
+success. The existing replay workflow, delivery ledger and provider idempotency
+remain responsible for the outcome.
+
+The dispatcher holds the request lock across a bounded Temporal submission, then
+commits dispatch status and audit together. Dependency errors leave it approved.
+After a crash or an ambiguous acknowledgement, it first reconciles an existing
+workflow, including completed workflows; expiry or a changed ledger cannot turn
+an already-submitted replay into a second attempt. Multiple worker replicas and
+concurrent CLI replay requests remain safe. Shutdown cancels and joins the polling
+loop before stopping the Temporal worker. Errors log only a safe category.
+
+For a live console-to-fake-phone check, after rebuilding the console and worker:
+
+```sh
+REPLAY_CONSOLE_INTEGRATION=1 DELIVERY_TEST_DATABASE_URL=postgresql://... \
+  go test -count=1 -run '^TestComposeConsoleReplay$' -v ./services/delivery-worker-go
+```
+
+Set `OPERATOR_TOKEN` and `ORACLE_ADMIN_TOKEN` if enabled. Defaults are console
+`http://127.0.0.1:18084` and Oracle `http://127.0.0.1:18080`; override with
+`OPS_CONSOLE_URL` and `ORACLE_URL`. This opt-in test creates one unique synthetic
+DLQ event/proposal, simulates human approval via HTTP, checks Temporal submission
+and exactly one fake-phone receipt, and verifies repeated API and Temporal requests
+are refused. It preserves shared Oracle rules and results and makes no model call.
+The fixture and audit records remain for inspection.
+
 The stored original and Kafka DLQ payload contain recipient/body data needed
 for replay; attempt history contains only safe error classifications. Restrict
 access to the database, DLQ topic and operator command accordingly.
